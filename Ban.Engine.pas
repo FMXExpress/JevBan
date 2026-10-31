@@ -601,8 +601,11 @@ begin
           Inc(LScore, 6);
           LTags.Add('known-bad-path');
         end
-        else
+        else if Pos('.', LPath) > 0 then
         begin
+          { served: a file that should not exist here (/phpinfo.php, /.env, /backup.zip).
+            A plain route that is served (/search, /download) is the site's own page:
+            on the LogarX shop those were 242 benign requests against 66 attacks }
           Inc(LScore, 3);
           LTags.Add('known-bad-path-served');
         end;

@@ -56,6 +56,7 @@ def main():
     with open(os.path.join(work, 'jevban.ini'), 'w') as f:
         f.write('[jevban]\nlogpath = %s\nstatefile = %s/state.json\npoll_ms = 100\n'
                 '[decider]\nsite = A WordPress blog. Only its owner logs in, a few times a week.\n'
+                'timeout_ms = 900000\n'
                 '[action]\ntype = none\n' % (log, work))
     cmd = [args.bin, '-c', os.path.join(work, 'jevban.ini'), '-v']
     if args.model:

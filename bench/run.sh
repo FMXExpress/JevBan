@@ -15,8 +15,12 @@ BIN=./build/jevban
 mkdir -p "$OUT"
 make -s >/dev/null
 [ -f bench/corpus/wordpress-dev.log ] || python3 bench/gen_corpus.py >/dev/null
+# real traffic: the LogarX/Zodiarc labelled shop log, downloaded (not redistributable); optional offline
+[ -f bench/corpus/logarx-small.log ] || python3 bench/fetch_logarx.py small >/dev/null 2>&1 || \
+  echo "bench: LogarX not available (offline?), skipped" >&2
 
-for log in bench/corpus/*-dev.log bench/corpus/*-test.log; do
+for log in bench/corpus/*-dev.log bench/corpus/*-test.log bench/corpus/logarx-*.log; do
+  [ -f "$log" ] || continue
   name=$(basename "$log" .log); profile=${name%-*}
   "$BIN" -c "bench/corpus/$profile.ini" --eval "$log" --mode rules --eval-json "$OUT/rules-$name.json" >/dev/null 2>&1
 done
