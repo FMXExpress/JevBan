@@ -46,6 +46,10 @@ type
     Threshold: Double;        { P(malicious) that counts as a strike }
     InstantThreshold: Double; { P(malicious) that bans at once }
     CacheSecs: Integer;       { reuse a client's verdict this long }
+    BatchInterval: Integer;   { flush the queue of flagged clients after this many seconds ... }
+    BatchLines: Integer;      { ... or this many log lines ... }
+    BatchClients: Integer;    { ... or when this many clients are queued (one request each flush) }
+    AskIntent: Boolean;       { also ask what each client is doing (a second readout per client) }
     MaxPerMinute: Integer;    { decider calls; beyond it, rules decide }
     OnError: string;          { rules | skip }
     RulesMinScore: Integer;   { rules: a strike }
@@ -95,6 +99,8 @@ begin
   WriteLn('  -m, --mode MODE        jev (ask the decision model) | rules (signatures only)');
   WriteLn('  -u, --jev-url URL      decision endpoint (default http://127.0.0.1:3000/v1/systemone)');
   WriteLn('  -a, --action TYPE      iptables | nftables | ufw | firewalld | fail2ban | netsh | command | none');
+  WriteLn('  -b, --batch SECONDS    queue flagged clients and ask the decider about them in one request');
+  WriteLn('                         every SECONDS (also every batch_lines lines / batch_clients clients)');
   WriteLn('      --list             print the bans in the state file and exit');
   WriteLn('  -v, --verbose          log every request the prefilter flags, and every verdict');
   WriteLn('  -h, --help             this text');
@@ -131,6 +137,9 @@ begin
   Threshold := 0.80;
   InstantThreshold := 0.97;
   CacheSecs := 60;
+  BatchInterval := 5;
+  BatchLines := 1000;
+  BatchClients := 8;
   MaxPerMinute := 120;
   OnError := 'rules';
   RulesMinScore := 6;
@@ -238,6 +247,8 @@ begin
         LCli.Values['url'] := NextVal
       else if (LArg = '-a') or (LArg = '--action') then
         LCli.Values['type'] := NextVal
+      else if (LArg = '-b') or (LArg = '--batch') then
+        LCli.Values['batch_interval'] := NextVal
       else if LArg = '--list' then
         ListBans := True
       else if (LArg = '-v') or (LArg = '--verbose') then
@@ -289,6 +300,10 @@ begin
       Threshold := F('threshold', Threshold);
       InstantThreshold := F('instant_threshold', InstantThreshold);
       CacheSecs := LIni.ReadInteger('decider', 'cache_secs', CacheSecs);
+      BatchInterval := LIni.ReadInteger('decider', 'batch_interval', BatchInterval);
+      BatchLines := LIni.ReadInteger('decider', 'batch_lines', BatchLines);
+      BatchClients := LIni.ReadInteger('decider', 'batch_clients', BatchClients);
+      AskIntent := LIni.ReadBool('decider', 'ask_intent', AskIntent);
       MaxPerMinute := LIni.ReadInteger('decider', 'max_per_minute', MaxPerMinute);
       OnError := LowerCase(LIni.ReadString('decider', 'on_error', OnError));
       RulesMinScore := LIni.ReadInteger('decider', 'rules_min_score', RulesMinScore);
@@ -323,6 +338,8 @@ begin
       Mode := LowerCase(LCli.Values['mode']);
     if LCli.Values['url'] <> '' then
       JevUrl := LCli.Values['url'];
+    if LCli.Values['batch_interval'] <> '' then
+      BatchInterval := StrToIntDef(LCli.Values['batch_interval'], BatchInterval);
     if LCli.Values['type'] <> '' then
       ActionType := LowerCase(LCli.Values['type']);
     if JevKey = '' then
@@ -362,6 +379,9 @@ begin
     raise EArgumentException.Create('threshold and instant_threshold are probabilities in (0, 1]');
   if (MaxRetry < 1) or (FindTime < 1) or (BanTime < 1) then
     raise EArgumentException.Create('maxretry, findtime and bantime must be positive');
+  if (BatchInterval < 0) or (BatchLines < 1) or (BatchClients < 1) or (BatchClients > 50) then
+    raise EArgumentException.Create('batch_interval >= 0, batch_lines >= 1, batch_clients 1..50 ' +
+      '(the decider reads at most 52 options per question, and 16k tokens per request)');
   if ContextLines < 1 then
     ContextLines := 1;
   if PollMs < 20 then

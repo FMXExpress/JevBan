@@ -180,44 +180,73 @@ end;
 procedure TestJev;
 var
   J: TJevClient;
-  LRecent: TStringList;
+  LItems: TList;
+  LItem: TJevItem;
   LData: TJSONData;
   LRoot, LQ: TJSONObject;
-  V: TJevVerdict;
+  LError: string;
+  I: Integer;
 begin
   J := TJevClient.Create;
-  LRecent := TStringList.Create;
+  LItems := TList.Create;
   try
-    LRecent.Add('31/Oct/2026:10:00:05 "GET /.env HTTP/1.1" 404 196 ua="x \"y\""');
-    LData := GetJSON(J.BuildRequest('203.0.113.66', 'GET /.git/config HTTP/1.1', 'vcs-dir', LRecent));
+    LItem := TJevItem.Create;
+    LItem.Ip := '203.0.113.66';
+    LItem.Hits := 'env-file,vcs-dir';
+    LItem.Flagged.Add('31/Oct/2026:10:00:05 "GET /.env HTTP/1.1" 404 196 ua="x \"y\""');
+    LItem.Flagged.Add('31/Oct/2026:10:00:05 "GET /.git/config HTTP/1.1" 404 196 ua="x"');
+    LItems.Add(LItem);
+    LItem := TJevItem.Create;
+    LItem.Ip := '2001:db8::1';
+    LItem.Hits := 'wordpress';
+    LItem.Flagged.Add('31/Oct/2026:10:00:06 "GET /wp-login.php HTTP/1.1" 200 1 ua="x"');
+    LItem.Earlier.Add('31/Oct/2026:10:00:01 "GET / HTTP/1.1" 200 1 ua="x"');
+    LItems.Add(LItem);
+
+    LData := GetJSON(J.BuildRequest(LItems));
     try
       LRoot := TJSONObject(LData);
       Check(LRoot.Get('model', '') = 'openjev', 'model');
-      Check(TJSONObject(LRoot.Objects['state']).Get('client_ip', '') = '203.0.113.66', 'state.client_ip');
-      Check(TJSONObject(LRoot.Objects['state']).Arrays['recent_requests_from_this_client_oldest_first'].Count = 1,
-        'state recent');
-      LQ := LRoot.Objects['questions'].Objects['malicious'];
-      Check((LQ.Get('type', '') = 'noul') and (LQ.Get('instructions', '') <> ''), 'noul question');
-      LQ := LRoot.Objects['questions'].Objects['intent'];
-      Check((LQ.Get('type', '') = 'choice') and (LQ.Objects['criteria'].Count = 6), 'choice question');
+      Check(LRoot.Objects['state'].Objects['clients'].Count = 2, 'two clients in one state');
+      Check(LRoot.Objects['state'].Objects['clients'].Objects['203.0.113.66'].Arrays['flagged_requests'].Count = 2,
+        'flagged requests');
+      Check(LRoot.Objects['state'].Objects['clients'].Objects['2001:db8::1'].Arrays['other_recent_requests'].Count = 1,
+        'other recent requests');
+      Check(LRoot.Objects['questions'].Count = 2, 'one question per client without ask_intent');
+      LQ := LRoot.Objects['questions'].Objects['c2'];
+      Check((LQ.Get('type', '') = 'noul') and (Pos('client 2001:db8::1', LQ.Get('instructions', '')) > 0),
+        'noul question names its client');
     finally
       LData.Free;
     end;
+    J.AskIntent := True;
+    LData := GetJSON(J.BuildRequest(LItems));
+    try
+      LQ := TJSONObject(LData).Objects['questions'].Objects['i1'];
+      Check((TJSONObject(LData).Objects['questions'].Count = 4) and (LQ.Get('type', '') = 'choice') and
+        (LQ.Objects['criteria'].Count = 6), 'intent questions');
+    finally
+      LData.Free;
+    end;
+
+    Check(ParseJevResponse('{"id":"shim-1","answers":{"c1":{"type":"noul","noul":0.9731},' +
+      '"c2":{"type":"noul","noul":0},"i1":{"type":"choice","choice":"vulnerability_scanner",' +
+      '"probabilities":{},"confidence":0.88}},"usage":{"input_tokens":512,"output_tokens":0}}', LItems, LError),
+      'response parses: ' + LError);
+    Check((Abs(TJevItem(LItems[0]).Malicious - 0.9731) < 1e-9) and
+      (TJevItem(LItems[0]).Intent = 'vulnerability_scanner'), 'first client answer');
+    Check(TJevItem(LItems[1]).Malicious = 0, 'second client, integer noul');
+    Check(not ParseJevResponse('{"answers":{"c1":{"noul":0.5}}}', LItems, LError) and (LError <> ''),
+      'a missing answer fails the batch');
+    Check(not ParseJevResponse('{"answers":{"c1":{"noul":1.5},"c2":{"noul":0}}}', LItems, LError),
+      'out of range');
+    Check(not ParseJevResponse('<html>bad gateway</html>', LItems, LError), 'not json');
   finally
-    LRecent.Free;
+    for I := 0 to LItems.Count - 1 do
+      TJevItem(LItems[I]).Free;
+    LItems.Free;
     J.Free;
   end;
-
-  Check(ParseJevResponse('{"id":"shim-1","answers":{"malicious":{"type":"noul","noul":0.9731},' +
-    '"intent":{"type":"choice","choice":"vulnerability_scanner","probabilities":{},"confidence":0.88}},' +
-    '"usage":{"input_tokens":512,"output_tokens":0}}', V), 'response parses');
-  Check(V.Ok and (Abs(V.Malicious - 0.9731) < 1e-9) and (V.Intent = 'vulnerability_scanner') and
-    (Abs(V.IntentConfidence - 0.88) < 1e-9), 'response fields');
-  Check(ParseJevResponse('{"answers":{"malicious":{"type":"noul","noul":0}}}', V) and (V.Malicious = 0),
-    'integer noul');
-  Check(not ParseJevResponse('{"answers":{}}', V) and (V.Error <> ''), 'missing answer');
-  Check(not ParseJevResponse('{"answers":{"malicious":{"noul":1.5}}}', V), 'out of range');
-  Check(not ParseJevResponse('<html>bad gateway</html>', V), 'not json');
 end;
 
 begin

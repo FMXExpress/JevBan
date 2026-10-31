@@ -4,20 +4,23 @@ unit Ban.Jev;
    API, or OpenJev (huggingface.co/openjev/openjev) behind its helper shim,
    which keeps the same request and response shapes. The model gets no
    training for this task; the decision is described in plain words at
-   request time:
+   request time.
 
-     state     = the site description, the client's recent requests and the
-                 request that tripped a signature
-     questions = "malicious": noul (calibrated probability of yes)
-                 "intent":    choice over what the client is doing
+   Calls are batched: one request carries every client queued since the last
+   flush, each with its own question over a shared state, so the server
+   reads the state once (prefix cache) and answers N clients:
+
+     state     = {"server": <site>, "clients": {"<ip>": {"signature_hits": ..,
+                  "flagged_requests": [..], "other_recent_requests": [..]}, ..}}
+     questions = "c1": noul "<question> Judge only client <ip> ..."
+                 "c2": ...
+                 "i1": choice over intents (only with ask_intent)
 
    and the answers come back as numbers, not free text:
-     {"answers": {"malicious": {"type": "noul", "noul": 0.97},
-                  "intent": {"type": "choice", "choice": "vulnerability_scanner",
-                             "probabilities": {...}, "confidence": 0.9}}}
+     {"answers": {"c1": {"type": "noul", "noul": 0.97}, ..}}
 
    Log lines are written by the attacker, so they go in as quoted data in the
-   state, never into the question; the readout is a single option letter, so
+   state, never into a question; the readout is a single option letter, so
    the worst a crafted line can do is argue for a lower probability. *)
 
 {$mode objfpc}{$H+}
@@ -28,13 +31,17 @@ uses
   SysUtils, Classes, fpjson, jsonparser, DateUtils;
 
 type
-  TJevVerdict = record
-    Ok: Boolean;
-    Error: string;
-    Malicious: Double;        { calibrated P(yes) }
+  { one client in a batch: the inputs, then the answer }
+  TJevItem = class
+  public
+    Ip: string;
+    Hits: string;
+    Flagged: TStringList;     { the requests that tripped a signature }
+    Earlier: TStringList;     { the client's other recent requests, oldest first }
+    Malicious: Double;        { calibrated P(yes); -1 = no answer }
     Intent: string;
-    IntentConfidence: Double;
-    LatencyMs: Int64;
+    constructor Create;
+    destructor Destroy; override;
   end;
 
   TJevClient = class
@@ -44,13 +51,15 @@ type
     Model: string;
     Site: string;            { what this server runs, in plain words }
     Question: string;
+    AskIntent: Boolean;      { a second question per client: twice the readouts }
     TimeoutMs: Integer;
     constructor Create;
-    function BuildRequest(const AIp, AFlagged, ATags: string; ARecent: TStrings): string;
-    function Decide(const AIp, AFlagged, ATags: string; ARecent: TStrings): TJevVerdict;
+    function BuildRequest(AItems: TList): string;
+    { fills each item's Malicious/Intent; False with AError on any failure }
+    function Decide(AItems: TList; out AError: string; out ALatencyMs: Int64): Boolean;
   end;
 
-function ParseJevResponse(const ABody: string; out V: TJevVerdict): Boolean;
+function ParseJevResponse(const ABody: string; AItems: TList; out AError: string): Boolean;
 
 const
   CDefaultQuestion = 'Is this client probing for or exploiting security vulnerabilities on this ' +
@@ -76,6 +85,25 @@ const
     ('credential_attack', 'brute-forcing or stuffing passwords against a login'),
     ('abusive_scraper', 'aggressively harvesting content or bandwidth'));
 
+{ TJevItem }
+
+constructor TJevItem.Create;
+begin
+  inherited Create;
+  Flagged := TStringList.Create;
+  Earlier := TStringList.Create;
+  Malicious := -1;
+end;
+
+destructor TJevItem.Destroy;
+begin
+  Earlier.Free;
+  Flagged.Free;
+  inherited Destroy;
+end;
+
+{ TJevClient }
+
 constructor TJevClient.Create;
 begin
   inherited Create;
@@ -86,45 +114,61 @@ begin
   TimeoutMs := 8000;
 end;
 
-function TJevClient.BuildRequest(const AIp, AFlagged, ATags: string; ARecent: TStrings): string;
+function StringsToJson(AList: TStrings): TJSONArray;
 var
-  LRoot, LState, LQuestions, LQ, LCrit: TJSONObject;
-  LRecent: TJSONArray;
   I: Integer;
+begin
+  Result := TJSONArray.Create;
+  for I := 0 to AList.Count - 1 do
+    Result.Add(AList[I]);
+end;
+
+function TJevClient.BuildRequest(AItems: TList): string;
+var
+  LRoot, LState, LClients, LClient, LQuestions, LQ, LCrit: TJSONObject;
+  LItem: TJevItem;
+  I, J: Integer;
 begin
   LRoot := TJSONObject.Create;
   try
     LRoot.Add('model', Model);
     LState := TJSONObject.Create;
     LState.Add('server', Site);
-    LState.Add('client_ip', AIp);
-    LState.Add('flagged_request', AFlagged);
-    LState.Add('signature_hits', ATags);
-    LRecent := TJSONArray.Create;
-    if ARecent <> nil then
-      for I := 0 to ARecent.Count - 1 do
-        LRecent.Add(ARecent[I]);
-    LState.Add('recent_requests_from_this_client_oldest_first', LRecent);
-    LRoot.Add('state', LState);
-
+    LClients := TJSONObject.Create;
     LQuestions := TJSONObject.Create;
-    LQ := TJSONObject.Create;
-    LQ.Add('type', 'noul');
-    LQ.Add('instructions', Question);
-    LCrit := TJSONObject.Create;
-    LCrit.Add('true', 'The client is attacking or probing the server and should be blocked.');
-    LCrit.Add('false', 'The client is a legitimate visitor or crawler, even if a request failed.');
-    LQ.Add('criteria', LCrit);
-    LQuestions.Add('malicious', LQ);
+    for I := 0 to AItems.Count - 1 do
+    begin
+      LItem := TJevItem(AItems[I]);
+      LClient := TJSONObject.Create;
+      LClient.Add('signature_hits', LItem.Hits);
+      LClient.Add('flagged_requests', StringsToJson(LItem.Flagged));
+      LClient.Add('other_recent_requests', StringsToJson(LItem.Earlier));
+      LClients.Add(LItem.Ip, LClient);
 
-    LQ := TJSONObject.Create;
-    LQ.Add('type', 'choice');
-    LQ.Add('instructions', 'What is this client doing?');
-    LCrit := TJSONObject.Create;
-    for I := 0 to High(CIntents) do
-      LCrit.Add(CIntents[I, 0], CIntents[I, 1]);
-    LQ.Add('criteria', LCrit);
-    LQuestions.Add('intent', LQ);
+      LQ := TJSONObject.Create;
+      LQ.Add('type', 'noul');
+      LQ.Add('instructions', Format('%s Judge only client %s (state.clients["%s"]); the other ' +
+        'clients are separate cases.', [Question, LItem.Ip, LItem.Ip]));
+      LCrit := TJSONObject.Create;
+      LCrit.Add('true', 'The client is attacking or probing the server and should be blocked.');
+      LCrit.Add('false', 'The client is a legitimate visitor or crawler, even if a request failed.');
+      LQ.Add('criteria', LCrit);
+      LQuestions.Add('c' + IntToStr(I + 1), LQ);
+
+      if AskIntent then
+      begin
+        LQ := TJSONObject.Create;
+        LQ.Add('type', 'choice');
+        LQ.Add('instructions', Format('What is client %s (state.clients["%s"]) doing?', [LItem.Ip, LItem.Ip]));
+        LCrit := TJSONObject.Create;
+        for J := 0 to High(CIntents) do
+          LCrit.Add(CIntents[J, 0], CIntents[J, 1]);
+        LQ.Add('criteria', LCrit);
+        LQuestions.Add('i' + IntToStr(I + 1), LQ);
+      end;
+    end;
+    LState.Add('clients', LClients);
+    LRoot.Add('state', LState);
     LRoot.Add('questions', LQuestions);
     Result := LRoot.AsJSON;
   finally
@@ -132,56 +176,58 @@ begin
   end;
 end;
 
-function ParseJevResponse(const ABody: string; out V: TJevVerdict): Boolean;
+function ParseJevResponse(const ABody: string; AItems: TList; out AError: string): Boolean;
 var
   LData: TJSONData;
-  LAnswers, LMal, LIntent: TJSONObject;
+  LAnswers, LAnswer: TJSONObject;
+  LItem: TJevItem;
+  I: Integer;
 begin
-  V := Default(TJevVerdict);
-  V.Malicious := -1;
   Result := False;
+  AError := '';
   try
     LData := GetJSON(ABody);
   except
     on E: Exception do
     begin
-      V.Error := 'response is not JSON: ' + Copy(ABody, 1, 120);
+      AError := 'response is not JSON: ' + Copy(ABody, 1, 120);
       Exit;
     end;
   end;
   try
-    if not (LData is TJSONObject) or
-       (TJSONObject(LData).Find('answers', LAnswers) = False) then
+    if not (LData is TJSONObject) or not TJSONObject(LData).Find('answers', LAnswers) then
     begin
-      V.Error := 'response has no "answers": ' + Copy(ABody, 1, 160);
+      AError := 'response has no "answers": ' + Copy(ABody, 1, 160);
       Exit;
     end;
-    if LAnswers.Find('malicious', LMal) then
-      V.Malicious := LMal.Get('noul', -1.0);
-    if LAnswers.Find('intent', LIntent) then
+    for I := 0 to AItems.Count - 1 do
     begin
-      V.Intent := LIntent.Get('choice', '');
-      V.IntentConfidence := LIntent.Get('confidence', 0.0);
+      LItem := TJevItem(AItems[I]);
+      LItem.Malicious := -1;
+      if LAnswers.Find('c' + IntToStr(I + 1), LAnswer) then
+        LItem.Malicious := LAnswer.Get('noul', -1.0);
+      if LAnswers.Find('i' + IntToStr(I + 1), LAnswer) then
+        LItem.Intent := LAnswer.Get('choice', '');
+      if (LItem.Malicious < 0) or (LItem.Malicious > 1) then
+      begin
+        AError := Format('answers.c%d.noul missing or out of range', [I + 1]);
+        Exit;
+      end;
     end;
-    if (V.Malicious < 0) or (V.Malicious > 1) then
-    begin
-      V.Error := 'answers.malicious.noul missing or out of range';
-      Exit;
-    end;
-    V.Ok := True;
     Result := True;
   finally
     LData.Free;
   end;
 end;
 
-function TJevClient.Decide(const AIp, AFlagged, ATags: string; ARecent: TStrings): TJevVerdict;
+function TJevClient.Decide(AItems: TList; out AError: string; out ALatencyMs: Int64): Boolean;
 var
   LBody, LResp: string;
   LStatus: Integer;
   LStart: TDateTime;
 begin
-  LBody := BuildRequest(AIp, AFlagged, ATags, ARecent);
+  Result := False;
+  LBody := BuildRequest(AItems);
   LStart := Now;
   try
     if ApiKey <> '' then
@@ -192,20 +238,16 @@ begin
   except
     on E: Exception do
     begin
-      Result := Default(TJevVerdict);
-      Result.Error := Format('%s: %s', [E.ClassName, E.Message]);
-      Result.LatencyMs := MilliSecondsBetween(Now, LStart);
+      AError := Format('%s: %s', [E.ClassName, E.Message]);
+      ALatencyMs := MilliSecondsBetween(Now, LStart);
       Exit;
     end;
   end;
+  ALatencyMs := MilliSecondsBetween(Now, LStart);
   if LStatus <> 200 then
-  begin
-    Result := Default(TJevVerdict);
-    Result.Error := Format('HTTP %d: %s', [LStatus, Copy(LResp, 1, 160)]);
-  end
+    AError := Format('HTTP %d: %s', [LStatus, Copy(LResp, 1, 160)])
   else
-    ParseJevResponse(LResp, Result);
-  Result.LatencyMs := MilliSecondsBetween(Now, LStart);
+    Result := ParseJevResponse(LResp, AItems, AError);
 end;
 
 end.

@@ -56,6 +56,7 @@ begin
       Engine.Feed(Line);
     Lines.Clear;
   end;
+  Engine.FlushAll;
   Engine.Log(Engine.Summary);
 end;
 

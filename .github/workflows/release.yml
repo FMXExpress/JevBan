@@ -1,0 +1,133 @@
+name: release
+
+# Push a tag v*, or run the workflow by hand with a version, to build and publish a release:
+#   jevban-<ver>-linux-x64.tar.gz      jevban, jevban.ini, jevban.service, README, LICENSE
+#   jevban-<ver>-windows-x64.zip       jevban.exe + OpenSSL 3 DLLs + cacert.pem, netsh preset
+# Each binary runs its unit tests and a replay of the sample log first. Pushes to main, pull
+# requests and a manual run without a version build without publishing; a manual run with version=x.y.z
+# tags the commit it ran on as vx.y.z.
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:          # build + test only
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version (e.g. 1.0.0): tags this commit v<version> and publishes. Empty = build only."
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+
+jobs:
+  linux:
+    runs-on: ubuntu-22.04    # glibc 2.35: runs on most current distributions
+    steps:
+      - uses: actions/checkout@v4
+      - name: Version
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          if [[ -n "$INPUT_VERSION" ]]; then V="${INPUT_VERSION#v}"
+          elif [[ "$GITHUB_REF" == refs/tags/v* ]]; then V="${GITHUB_REF_NAME#v}"
+          else V="dev-${GITHUB_SHA::7}"; fi
+          echo "VERSION=$V" >> "$GITHUB_ENV"
+      - name: Toolchain
+        run: sudo apt-get update && sudo apt-get install -y fpc
+      - name: Build and test
+        run: make test
+      - name: End to end against the mock decider
+        run: |
+          python3 tests/mock_jev.py 3000 &
+          sleep 1
+          ./build/jevban --test tests/sample_access.log | tee out.txt
+          grep -q "Ban 192.0.2.44" out.txt
+          ! grep -q "Ban 198.51.100.7" out.txt
+      - name: Package
+        run: |
+          OUT="jevban-$VERSION-linux-x64"
+          mkdir -p "dist/$OUT"
+          strip build/jevban
+          cp build/jevban jevban.ini jevban.service README.md LICENSE "dist/$OUT/"
+          tar -C dist -czf "dist/$OUT.tar.gz" "$OUT"
+          "dist/$OUT/jevban" --version
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux
+          path: dist/jevban-*-linux-x64.tar.gz
+
+  windows:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - name: Version
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          if [[ -n "$INPUT_VERSION" ]]; then V="${INPUT_VERSION#v}"
+          elif [[ "$GITHUB_REF" == refs/tags/v* ]]; then V="${GITHUB_REF_NAME#v}"
+          else V="dev-${GITHUB_SHA::7}"; fi
+          echo "VERSION=$V" >> "$GITHUB_ENV"
+      - name: Free Pascal (Lazarus ships FPC 3.2.2 for win64)
+        shell: pwsh
+        run: |
+          choco install lazarus -y --no-progress
+          $fpc = Get-ChildItem C:\lazarus\fpc -Recurse -Filter fpc.exe | Where-Object { $_.FullName -like '*x86_64-win64*' } | Select-Object -First 1
+          if (-not $fpc) { throw "fpc.exe not found under C:\lazarus\fpc" }
+          "FPC=$($fpc.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append
+          & $fpc.FullName -iV
+      - name: Build and test
+        run: |
+          mkdir -p build/units
+          "$FPC" -O2 -Sh -vewn -FUbuild/units -obuild/jevban.exe jevban.lpr
+          "$FPC" -O2 -Sh -vewn -Fu. -FUbuild/units -obuild/jevban_test.exe tests/jevban_test.lpr
+          cp tests/sample_access.log build/
+          ./build/jevban_test.exe
+          ./build/jevban.exe --test tests/sample_access.log --mode rules | tee out.txt
+          grep -q "Ban 192.0.2.44" out.txt
+      - name: Package
+        run: |
+          OUT="dist/jevban-$VERSION-windows-x64"
+          mkdir -p "$OUT"
+          cp build/jevban.exe README.md LICENSE "$OUT/"
+          # Windows defaults: Apache Lounge's log path, the netsh action, state next to the exe
+          sed -e 's|^logpath = .*|logpath = C:\\Apache24\\logs\\access.log|' \
+              -e 's|^type = iptables|type = netsh|' \
+              -e 's|^statefile = .*|; statefile = (default: jevban-state.json next to jevban.exe)|' \
+              jevban.ini > "$OUT/jevban.ini"
+          curl -fsSL -o "$OUT/cacert.pem" https://curl.se/ca/cacert.pem
+          # OpenSSL 3 for https:// decider URLs: the runner image's, else Git for Windows'
+          for d in "/c/Program Files/OpenSSL/bin" "/c/Program Files/OpenSSL-Win64/bin" "/c/Program Files/Git/mingw64/bin"; do
+            if [ -f "$d/libssl-3-x64.dll" ]; then cp "$d/libssl-3-x64.dll" "$d/libcrypto-3-x64.dll" "$OUT/"; break; fi
+          done
+          [ -f "$OUT/libssl-3-x64.dll" ] || { echo "no OpenSSL 3 DLLs found"; exit 1; }
+          "$OUT/jevban.exe" --version
+          cd dist && 7z a -tzip "jevban-$VERSION-windows-x64.zip" "jevban-$VERSION-windows-x64" > /dev/null
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: dist/jevban-*-windows-x64.zip
+
+  publish:
+    if: startsWith(github.ref, 'refs/tags/v') || inputs.version != ''
+    needs: [linux, windows]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          # a manual run creates the tag on the commit it built
+          tag_name: ${{ inputs.version != '' && format('v{0}', inputs.version) || github.ref_name }}
+          target_commitish: ${{ github.sha }}
+          prerelease: ${{ contains(inputs.version != '' && inputs.version || github.ref_name, '-') }}
+          generate_release_notes: true

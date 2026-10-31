@@ -15,6 +15,12 @@ access.log ──tail -F──▶ parse ──▶ signatures (cheap) ──suspi
 Why a model: `GET /wp-login.php` is a probe on a static site and a normal login on a WordPress
 site. You write that in `site =` and the model weighs it. A regex can't.
 
+## Download
+
+Linux x64 and Windows x64 builds are on the [Releases page](https://github.com/FMXExpress/jevban/releases).
+The Windows zip has the OpenSSL DLLs and `cacert.pem` for `https://` decider URLs, and its
+`jevban.ini` uses the `netsh` action.
+
 ## Build and try it
 
 ```bash
@@ -52,40 +58,72 @@ sudo jevban --list                                                   # active ba
 
 It has to run as root (or with `CAP_NET_ADMIN`) to change the firewall.
 
+## How it scans, and how often it calls the model
+
+Every log line goes through the cheap steps. Only the leftovers reach the model, and they go
+in batches:
+
+1. **Every line** is parsed and scored by the signatures: about 30 regexes, microseconds per
+   line. Most traffic scores 0 and stops here. The line is still kept as context: the last
+   `context_lines` requests of each client.
+2. **A flagged line** (score >= `suspicious_score`) from a client with a fresh verdict (younger
+   than `cache_secs`) reuses that verdict. No model call.
+3. **Otherwise the client is queued.** More flagged lines from a queued client join the same
+   entry; they don't add new questions.
+4. **The queue is flushed as one request** when any of these happens first:
+   - the oldest client has waited `batch_interval` seconds (default 5);
+   - `batch_lines` log lines went by (default 1000);
+   - `batch_clients` clients are queued (default 8).
+
+   That one `POST /v1/systemone` holds every queued client in `state.clients` and asks one
+   yes/no question per client (`c1`, `c2`, ...). The decision server reads the shared state
+   once (prefix cache) and answers all of them.
+5. Each flagged request of a client gets that client's probability. With the default
+   `maxretry`, a scanner that sent 3 probes inside the window comes out of one batch banned.
+
+Example: a scanner firing 200 probes in 10 seconds costs 2 questions, not 200 calls. 50
+scanners in the same 5 seconds cost 7 requests (8 clients each). `max_per_minute` caps the
+requests; past it, the signatures decide. `batch_interval = 0` with `batch_clients = 1`
+asks about each client at once, if you'd rather have the lowest latency.
+
 ## The decider (Jev compatible)
 
-`mode = jev` (the default) sends one `POST /v1/systemone` per suspicious client. That is
-the request shape of the hosted Jev API, which [OpenJev](https://huggingface.co/openjev/openjev)'s
-helper (`helper/shim.py`, port 3000 in its SERVE.md) serves on top of vLLM. Point `url`
-at either one. Set `api_key` or `JEV_API_KEY` if the server wants a bearer token.
+`mode = jev` (the default) sends batches as described above to `url`. The request shape is the
+hosted Jev API's, which [OpenJev](https://huggingface.co/openjev/openjev)'s helper
+(`helper/shim.py`, port 3000 in its SERVE.md) serves on top of vLLM. Point `url` at either
+one. Set `api_key` or `JEV_API_KEY` if the server wants a bearer token.
 
 ```json
 {"model": "openjev",
- "state": {"server": "<site>", "client_ip": "203.0.113.66",
-           "flagged_request": "GET /.git/config HTTP/1.1", "signature_hits": "vcs-dir",
-           "recent_requests_from_this_client_oldest_first": ["... \"GET /.env HTTP/1.1\" 404 ..."]},
+ "state": {"server": "<site>",
+           "clients": {
+             "203.0.113.66": {"signature_hits": "env-file,vcs-dir",
+                              "flagged_requests": ["... \"GET /.env HTTP/1.1\" 404 ...",
+                                                   "... \"GET /.git/config HTTP/1.1\" 404 ..."],
+                              "other_recent_requests": []},
+             "198.51.100.7": {"signature_hits": "wordpress", "flagged_requests": ["..."],
+                              "other_recent_requests": ["... \"GET /blog/ HTTP/1.1\" 200 ..."]}}},
  "questions": {
-   "malicious": {"type": "noul", "instructions": "Is this client probing for or exploiting ...?",
-                 "criteria": {"true": "...", "false": "..."}},
-   "intent":    {"type": "choice", "instructions": "What is this client doing?",
-                 "criteria": {"legitimate_visitor": "...", "search_crawler": "...",
-                              "vulnerability_scanner": "...", "exploit_attempt": "...",
-                              "credential_attack": "...", "abusive_scraper": "..."}}}}
+   "c1": {"type": "noul", "instructions": "Is this client probing for or exploiting ...? Judge only client 203.0.113.66 (state.clients[\"203.0.113.66\"]) ...",
+          "criteria": {"true": "...", "false": "..."}},
+   "c2": {"type": "noul", "instructions": "... Judge only client 198.51.100.7 ..."}}}
 ```
 
-`answers.malicious.noul` (a calibrated probability) is the decision:
+With `ask_intent = 1`, each client also gets an `i<n>` choice question (`legitimate_visitor`,
+`search_crawler`, `vulnerability_scanner`, `exploit_attempt`, `credential_attack`,
+`abusive_scraper`); the answer goes in the log.
+
+`answers.c<n>.noul` (a calibrated probability) is the decision for client n, per flagged request:
 
 - `>= threshold` (0.80) is a strike;
 - `>= instant_threshold` (0.97) bans at once.
 
-`intent` goes in the log.
+If the API is down, `on_error = rules` falls back to the signatures for that batch.
+`mode = rules` never calls a model.
 
-What keeps the decider calls down, and what happens when it fails:
-
-- A verdict is cached per client for `cache_secs`, so a scanner firing 200 probes costs one call.
-- Beyond `max_per_minute` calls, the signatures decide.
-- If the API is down, `on_error = rules` falls back to the signatures.
-- `mode = rules` never calls a model.
+All the clients in a batch share one `state`. A client's log lines could try to talk about
+another client, but only clients that already tripped a signature are in a batch.
+`batch_clients = 1` keeps every client in a request of its own.
 
 Log lines are written by the attacker. They go to the model as quoted data in `state`, never
 as instructions, and the model's answer is a single option letter. The worst a crafted line can
