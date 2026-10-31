@@ -129,6 +129,7 @@ type
     procedure AddStrike(C: TClient; ANow: Int64; AInstant: Boolean; const AReason: string);
     procedure BanClient(C: TClient; const AReason: string);
     procedure Purge(ANow: Int64);
+    procedure EvictOldest(ACount: Integer);
     procedure LoadState;
     procedure SaveState;
   public
@@ -249,9 +250,64 @@ begin
   end;
 end;
 
+procedure TBanEngine.EvictOldest(ACount: Integer);
+var
+  LSeen: array of Int64;
+  I, N: Integer;
+  LCutoff: Int64;
+
+  procedure Sort(L, R: Integer);
+  var
+    I, J: Integer;
+    P, T: Int64;
+  begin
+    while L < R do
+    begin
+      I := L;
+      J := R;
+      P := LSeen[(L + R) div 2];
+      repeat
+        while LSeen[I] < P do
+          Inc(I);
+        while LSeen[J] > P do
+          Dec(J);
+        if I <= J then
+        begin
+          T := LSeen[I];
+          LSeen[I] := LSeen[J];
+          LSeen[J] := T;
+          Inc(I);
+          Dec(J);
+        end;
+      until I > J;
+      if J - L < R - I then
+      begin
+        Sort(L, J);
+        L := I;
+      end
+      else
+      begin
+        Sort(I, R);
+        R := J;
+      end;
+    end;
+  end;
+
+begin
+  N := FClients.Count;
+  SetLength(LSeen, N);
+  for I := 0 to N - 1 do
+    LSeen[I] := TClient(FClients.Objects[I]).LastSeen;
+  Sort(0, N - 1);
+  LCutoff := LSeen[Min(ACount, N) - 1];
+  for I := N - 1 downto 0 do
+    if (TClient(FClients.Objects[I]).LastSeen <= LCutoff) and not TClient(FClients.Objects[I]).Queued then
+      FClients.Delete(I);
+end;
+
 function TBanEngine.GetClient(const E: TAccessEntry; ANow: Int64): TClient;
 var
-  I, LOldest: Integer;
+  I: Integer;
 begin
   I := FClients.IndexOf(E.IpText);
   if I >= 0 then
@@ -260,16 +316,9 @@ begin
   begin
     Purge(ANow);
     if FClients.Count >= FCfg.MaxClients then
-    begin
-      { still full: drop the client seen longest ago }
-      LOldest := -1;
-      for I := 0 to FClients.Count - 1 do
-        if not TClient(FClients.Objects[I]).Queued and ((LOldest < 0) or
-           (TClient(FClients.Objects[I]).LastSeen < TClient(FClients.Objects[LOldest]).LastSeen)) then
-          LOldest := I;
-      if LOldest >= 0 then
-        FClients.Delete(LOldest);
-    end;
+      { still full (a flood of new addresses): drop the oldest tenth in one pass,
+        so the next inserts don't each scan the whole table }
+      EvictOldest(Max(1, FClients.Count div 10));
   end;
   Result := TClient.Create;
   Result.IpText := E.IpText;
