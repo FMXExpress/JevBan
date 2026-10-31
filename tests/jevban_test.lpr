@@ -270,6 +270,79 @@ begin
   end;
 end;
 
+procedure TestJsonScanner;
+const
+  { must be taken by the fast scanner, and agree with fpjson }
+  CFast: array[0..11] of string = (
+    '{"remote_addr":"203.0.113.5","request":"GET /a?b=%2e HTTP/1.1","status":"404","body_bytes_sent":"9"}',
+    '{"time_iso8601":"2026-10-31T12:00:03+02:00","status":200,"bytes":-12,"ok":true,"no":false,"x":null}',
+    '{"ua":"x \"y\" \\ \/ \b\f\n\r\t \u0001 \u001f \u0041"}',
+    '{"request":{"client_ip":"203.0.113.6","headers":{"User-Agent":["curl/8"],"Accept":[]}},"status":404,"size":0}',
+    '{"ClientAddr":"[2001:db8::7]:5123","DownstreamStatus":403,"StartUTC":"2026-10-31T10:00:03.1Z"}',
+    ' { "a" : [ 1 , [ 2 , { "b" : "c" } ] , "d" ] , "e" : { } , "f" : [ ] } ',
+    '{}',
+    '{"a":"","b":"-","c":0,"d":-7}',
+    '{"Status":1,"status":2}',
+    '{"deep":{"a":{"b":{"c":{"d":"e"}}}}}',
+    '{"n":123456789012345678}',
+    '{"t":1793440803.5,"e":1.5e3,"f":-2.25E-2,"g":0.5,"h":-0.5}');
+  { left to fpjson (the scanner gives up), which then decides }
+  CFallback: array[0..7] of string = (
+    '{"n":-0}',
+    '{"n":007}',
+    '{"s":"\ud83d\ude00"}',
+    '{"a":1,"a":2}',
+    '{"a":1} x',
+    '[1,2]',
+    '{"a":"raw' + #9 + 'tab"}',
+    '{"n":12345678901234567890}');
+var
+  I: Integer;
+  F, T: string;
+begin
+  for I := Low(CFast) to High(CFast) do
+  begin
+    F := JsonNodesFast(CFast[I]);
+    T := JsonNodesTree(CFast[I]);
+    Check((F <> '') and (F = T), Format('json scanner = fpjson: %s%s', [CFast[I],
+      BoolToStr(F = T, '', LineEnding + 'fast:' + LineEnding + F + 'fpjson:' + LineEnding + T)]));
+  end;
+  for I := Low(CFallback) to High(CFallback) do
+    Check(JsonNodesFast(CFallback[I]) = '', 'json scanner leaves to fpjson: ' + CFallback[I]);
+  (* raw UTF-8 is kept byte for byte (Apache logs it as \xhh, and ApacheEscape
+     does the same after); fpjson turns it into '?' and stray bytes *)
+  F := JsonNodesFast('{"u":"caf' + #$C3#$A9 + ' ' + #$E2#$82#$AC + '"}');
+  Check(Pos('|u|s|caf' + #$C3#$A9 + ' ' + #$E2#$82#$AC, F) > 0, 'json scanner keeps raw UTF-8');
+  { and writes \u escapes above ASCII as UTF-8, where fpjson gives one ANSI byte or '?' }
+  F := JsonNodesFast('{"u":"caf\u00e9 \u20ac"}');
+  Check(Pos('|u|s|caf' + #$C3#$A9 + ' ' + #$E2#$82#$AC, F) > 0, 'json scanner decodes \u to UTF-8');
+end;
+
+procedure TestApacheEscape;
+var
+  I, LBad: Integer;
+  LAll, LWant: string;
+begin
+  { every byte against the definition: \" \\ and \xhh for control and non-ASCII bytes }
+  LAll := '';
+  LWant := '';
+  for I := 0 to 255 do
+  begin
+    LAll := LAll + Chr(I);
+    case Chr(I) of
+      '"', '\': LWant := LWant + '\' + Chr(I);
+      #32..#33, #35..#91, #93..#126: LWant := LWant + Chr(I);
+    else
+      LWant := LWant + '\x' + LowerCase(IntToHex(I, 2));
+    end;
+  end;
+  Check(ApacheEscape(LAll) = LWant, 'apache escape: all 256 bytes');
+  LBad := 0;
+  if ApacheEscape('') <> '' then Inc(LBad);
+  if ApacheEscape('plain /path?a=1') <> 'plain /path?a=1' then Inc(LBad);
+  Check(LBad = 0, 'apache escape: empty and plain text unchanged');
+end;
+
 procedure TestSignatures;
 var
   S: TSignatureSet;
@@ -520,6 +593,8 @@ begin
   TestLocal;
   TestApache;
   TestLogFormats;
+  TestJsonScanner;
+  TestApacheEscape;
   TestTailLayout;
   TestStrMap;
   TestSignatures;
