@@ -78,7 +78,7 @@ jobs:
           mkdir -p /tmp/smoke && tar -C /tmp/smoke -xzf dist/jevban-*-linux-x64.tar.gz
           cd /tmp
           /tmp/smoke/jevban-*/jevban --test "$GITHUB_WORKSPACE/tests/sample_access.log" --model /tmp/smoke.gguf | tee out.txt
-          grep -q "decider local Qwen3-0.6B-Q8_0.gguf" out.txt
+          grep -q "decider local smoke.gguf" out.txt
           grep -q "via local batch of" out.txt
       - uses: actions/upload-artifact@v4
         with:
