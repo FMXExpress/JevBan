@@ -44,7 +44,15 @@ type
     destructor Destroy; override;
   end;
 
-  TJevClient = class
+  { what the engine asks: the remote API (TJevClient) or the model in-process (Ban.Local) }
+  TDecider = class
+  public
+    { fills each item's Malicious/Intent; False with AError on any failure }
+    function Decide(AItems: TList; out AError: string; out ALatencyMs: Int64): Boolean; virtual; abstract;
+    function Describe: string; virtual; abstract;
+  end;
+
+  TJevClient = class(TDecider)
   public
     Url: string;
     ApiKey: string;
@@ -55,8 +63,8 @@ type
     TimeoutMs: Integer;
     constructor Create;
     function BuildRequest(AItems: TList): string;
-    { fills each item's Malicious/Intent; False with AError on any failure }
-    function Decide(AItems: TList; out AError: string; out ALatencyMs: Int64): Boolean;
+    function Decide(AItems: TList; out AError: string; out ALatencyMs: Int64): Boolean; override;
+    function Describe: string; override;
   end;
 
 function ParseJevResponse(const ABody: string; AItems: TList; out AError: string): Boolean;
@@ -68,13 +76,9 @@ const
     'search engine?';
   CDefaultSite = 'A public web server. Judge requests against what a normal visitor or a ' +
     'well-behaved search engine would ask for.';
-
-implementation
-
-uses
-  Ban.Https;
-
-const
+  CYes = 'The client is attacking or probing the server and should be blocked.';
+  CNo = 'The client is a legitimate visitor or crawler, even if a request failed.';
+  CIntentQuestion = 'What is this client doing?';
   CIntents: array[0..5, 0..1] of string = (
     ('legitimate_visitor', 'a person or app using the site normally, including the odd broken link'),
     ('search_crawler', 'a well-behaved search engine or monitoring bot fetching public pages'),
@@ -84,6 +88,11 @@ const
       'execution, web shell access'),
     ('credential_attack', 'brute-forcing or stuffing passwords against a login'),
     ('abusive_scraper', 'aggressively harvesting content or bandwidth'));
+
+implementation
+
+uses
+  Ban.Https;
 
 { TJevItem }
 
@@ -150,8 +159,8 @@ begin
       LQ.Add('instructions', Format('%s Judge only client %s (state.clients["%s"]); the other ' +
         'clients are separate cases.', [Question, LItem.Ip, LItem.Ip]));
       LCrit := TJSONObject.Create;
-      LCrit.Add('true', 'The client is attacking or probing the server and should be blocked.');
-      LCrit.Add('false', 'The client is a legitimate visitor or crawler, even if a request failed.');
+      LCrit.Add('true', CYes);
+      LCrit.Add('false', CNo);
       LQ.Add('criteria', LCrit);
       LQuestions.Add('c' + IntToStr(I + 1), LQ);
 
@@ -218,6 +227,11 @@ begin
   finally
     LData.Free;
   end;
+end;
+
+function TJevClient.Describe: string;
+begin
+  Result := 'jev at ' + Url;
 end;
 
 function TJevClient.Decide(AItems: TList; out AError: string; out ALatencyMs: Int64): Boolean;

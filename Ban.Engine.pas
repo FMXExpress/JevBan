@@ -26,7 +26,7 @@ interface
 
 uses
   SysUtils, Classes, Math, fpjson, jsonparser,
-  Ban.Net, Ban.Apache, Ban.Signatures, Ban.Jev, Ban.Firewall, Ban.Config;
+  Ban.Net, Ban.Apache, Ban.Signatures, Ban.Jev, Ban.Local, Ban.Firewall, Ban.Config;
 
 type
   TClient = class
@@ -70,7 +70,7 @@ type
   private
     FCfg: TBanConfig;
     FSigs: TSignatureSet;
-    FJev: TJevClient;
+    FDecider: TDecider;      { nil in rules mode, or when the local model could not be loaded }
     FAction: TBanAction;
     FClients: TStringList;   { ip -> TClient }
     FBans: TStringList;      { ip -> TBanRecord }
@@ -109,8 +109,12 @@ type
     procedure Feed(const ALine: string);
     { unbans the expired, forgets idle clients, saves the state }
     procedure Tick;
+    { the remote client, or the local model (downloaded on first use); on
+      failure logs why and leaves the rules to decide }
+    procedure InitDecider;
     { asks the decider about everything still queued (end of --test) }
     procedure FlushAll;
+    function Describe: string;
     procedure PrintBans;
     function Summary: string;
   end;
@@ -146,14 +150,6 @@ begin
   FSigs := TSignatureSet.Create(FCfg.BuiltinSignatures);
   if FCfg.SignatureFile <> '' then
     FSigs.LoadFile(FCfg.SignatureFile);
-  FJev := TJevClient.Create;
-  FJev.Url := FCfg.JevUrl;
-  FJev.ApiKey := FCfg.JevKey;
-  FJev.Model := FCfg.JevModel;
-  FJev.Site := FCfg.Site;
-  FJev.Question := FCfg.Question;
-  FJev.TimeoutMs := FCfg.TimeoutMs;
-  FJev.AskIntent := FCfg.AskIntent;
   FQueue := TList.Create;
   FAction := TBanAction.Create(@Log);
   FAction.Kind := FCfg.ActionType;
@@ -190,7 +186,7 @@ begin
   FBans.Free;
   FClients.Free;
   FAction.Free;
-  FJev.Free;
+  FDecider.Free;
   FSigs.Free;
   inherited Destroy;
 end;
@@ -318,14 +314,14 @@ procedure TBanEngine.Judge(C: TClient; const ASummary: string; AScore: Integer; 
 var
   LTag: string;
 begin
-  if FCfg.Mode = 'rules' then
+  if FDecider = nil then
   begin
     ApplyRules(C, AScore, ATags.CommaText, ASummary, 'rules', ANow);
     Exit;
   end;
   if (C.VerdictAt > 0) and (ANow - C.VerdictAt < FCfg.CacheSecs) and not C.Queued then
   begin
-    ApplyVerdict(C, C.VerdictMal, C.VerdictIntent, AScore, ATags.CommaText, ASummary, 'jev (cached)', ANow);
+    ApplyVerdict(C, C.VerdictMal, C.VerdictIntent, AScore, ATags.CommaText, ASummary, FCfg.Mode + ' (cached)', ANow);
     Exit;
   end;
   { the next batch decides }
@@ -456,9 +452,9 @@ begin
         Inc(FMinuteCalls);
         Inc(Stats.DeciderCalls);
         Inc(Stats.DeciderClients, LItems.Count);
-        LOk := FJev.Decide(LItems, LError, LMs);
+        LOk := FDecider.Decide(LItems, LError, LMs);
         if LOk then
-          LHow := Format('jev batch of %d, %dms', [LItems.Count, LMs])
+          LHow := Format('%s batch of %d, %dms', [FCfg.Mode, LItems.Count, LMs])
         else
         begin
           Inc(Stats.DeciderErrors);
@@ -512,6 +508,57 @@ begin
     LClients.Free;
   end;
   FLinesSinceFlush := 0;
+end;
+
+procedure TBanEngine.InitDecider;
+var
+  LJev: TJevClient;
+  LLocal: TLocalJudge;
+  LInfo: TLocalModelInfo;
+  LPath: string;
+begin
+  if FCfg.Mode = 'jev' then
+  begin
+    LJev := TJevClient.Create;
+    LJev.Url := FCfg.JevUrl;
+    LJev.ApiKey := FCfg.JevKey;
+    LJev.Model := FCfg.JevModel;
+    LJev.Site := FCfg.Site;
+    LJev.Question := FCfg.Question;
+    LJev.TimeoutMs := FCfg.TimeoutMs;
+    LJev.AskIntent := FCfg.AskIntent;
+    FDecider := LJev;
+  end
+  else if FCfg.Mode = 'local' then
+  try
+    LPath := EnsureLocalModel(FCfg.LocalModel, FCfg.ModelDir, @Log);
+    Log('loading ' + LPath);
+    LLocal := TLocalJudge.Create(LPath, FCfg.LlamaLibDir, FCfg.Threads, FCfg.GpuLayers, FCfg.CtxTokens);
+    LLocal.Site := FCfg.Site;
+    LLocal.Question := FCfg.Question;
+    LLocal.AskIntent := FCfg.AskIntent;
+    { the calibration of the model's family, unless the config sets its own }
+    if not FindLocalModel(FCfg.LocalModel, LInfo) then
+      FindLocalModel('flash-9b', LInfo);
+    LLocal.T := IfThen(FCfg.ReadoutT > 0, FCfg.ReadoutT, LInfo.T);
+    LLocal.NoulT := IfThen(FCfg.NoulT > 0, FCfg.NoulT, LInfo.NoulT);
+    if IsNan(FCfg.NoulBias) then
+      LLocal.NoulBias := LInfo.NoulBias
+    else
+      LLocal.NoulBias := FCfg.NoulBias;
+    FDecider := LLocal;
+  except
+    on E: Exception do
+      Log(Format('local model unavailable, the signatures decide instead: %s', [E.Message]));
+  end;
+end;
+
+function TBanEngine.Describe: string;
+begin
+  if FDecider <> nil then
+    Result := FDecider.Describe
+  else
+    Result := 'rules';
 end;
 
 procedure TBanEngine.FlushAll;

@@ -7,8 +7,8 @@ program jevban_test;
 {$mode objfpc}{$H+}
 
 uses
-  SysUtils, Classes, fpjson, jsonparser,
-  Ban.Net, Ban.Apache, Ban.Signatures, Ban.Jev;
+  SysUtils, Classes, Math, fpjson, jsonparser,
+  Ban.Net, Ban.Apache, Ban.Signatures, Ban.Jev, Ban.Local;
 
 var
   Failures: Integer = 0;
@@ -249,8 +249,23 @@ begin
   end;
 end;
 
+procedure TestLocal;
+var
+  LInfo: TLocalModelInfo;
+begin
+  { Python's json.dumps(s, ensure_ascii=False) }
+  Check(PyJsonStr('a"b\c') = '"a\"b\\c"', 'json quotes and backslash: ' + PyJsonStr('a"b\c'));
+  Check(PyJsonStr('x'#10#9#1'y') = '"x\n\t\u0001y"', 'json controls: ' + PyJsonStr('x'#10#9#1'y'));
+  Check(PyJsonStr('caf'#$C3#$A9) = '"caf'#$C3#$A9'"', 'json keeps utf-8');
+  Check(FindLocalModel('flash-9b', LInfo) and (LInfo.FileName = 'OpenJev-Flash-9B-Q4_K_M.gguf') and
+    SameValue(LInfo.T, 1.07), 'flash-9b entry');
+  Check(FindLocalModel('27B-Q8', LInfo) and (LInfo.Size = 28595763520) and SameValue(LInfo.NoulT, 1.829074), '27b-q8 entry');
+  Check(not FindLocalModel('/tmp/x.gguf', LInfo), 'a path is not a key');
+end;
+
 begin
   TestNet;
+  TestLocal;
   TestApache;
   TestSignatures;
   TestSignatureFile;

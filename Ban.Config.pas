@@ -11,7 +11,7 @@ unit Ban.Config;
 interface
 
 uses
-  SysUtils, Classes, IniFiles, Ban.Net;
+  SysUtils, Classes, Math, IniFiles, Ban.Net;
 
 type
   TBanConfig = class
@@ -38,7 +38,14 @@ type
     SuspiciousScore: Integer; { prefilter score that sends a request to the decider }
     Verbose: Boolean;
     { [decider] }
-    Mode: string;             { jev | rules }
+    Mode: string;             { local (OpenJev in-process) | jev (a /v1/systemone server) | rules }
+    LocalModel: string;       { flash-9b, flash-9b-q8, 27b, ... or a .gguf path }
+    ModelDir: string;
+    LlamaLibDir: string;
+    Threads: Integer;
+    GpuLayers: Integer;
+    CtxTokens: Integer;
+    ReadoutT, NoulT, NoulBias: Double;   { 0 = the model card's values (NoulBias: NaN) }
     JevUrl: string;
     JevKey: string;
     JevModel: string;
@@ -96,8 +103,11 @@ begin
   WriteLn('      --from-start       read the logs from their start, not just new lines');
   WriteLn('  -t, --test FILE        read FILE once, print each decision, ban nothing (like fail2ban-regex)');
   WriteLn('  -n, --dry-run          log the firewall commands instead of running them');
-  WriteLn('  -m, --mode MODE        jev (ask the decision model) | rules (signatures only)');
-  WriteLn('  -u, --jev-url URL      decision endpoint (default http://127.0.0.1:3000/v1/systemone)');
+  WriteLn('  -m, --mode MODE        local (OpenJev in-process, the default) | jev (a /v1/systemone server)');
+  WriteLn('                         | rules (signatures only)');
+  WriteLn('      --model NAME       local model: flash-9b (5.6 GB, default), flash-9b-q5/-q6/-q8, 27b,');
+  WriteLn('                         27b-q5/-q6/-q8, or a .gguf path; downloaded on first use');
+  WriteLn('  -u, --jev-url URL      ask this /v1/systemone server instead (implies --mode jev)');
   WriteLn('  -a, --action TYPE      iptables | nftables | ufw | firewalld | fail2ban | netsh | command | none');
   WriteLn('  -b, --batch SECONDS    queue flagged clients and ask the decider about them in one request');
   WriteLn('                         every SECONDS (also every batch_lines lines / batch_clients clients)');
@@ -130,7 +140,20 @@ begin
   Flood4xx := 40;
   BuiltinSignatures := True;
   SuspiciousScore := 3;
-  Mode := 'jev';
+  Mode := 'local';
+  LocalModel := 'flash-9b';
+  {$IFDEF WINDOWS}
+  ModelDir := ExtractFilePath(ParamStr(0)) + 'models';
+  {$ELSE}
+  if GetEnvironmentVariable('USER') = 'root' then
+    ModelDir := '/var/lib/jevban/models'
+  else
+    ModelDir := IncludeTrailingPathDelimiter(GetUserDir) + '.cache/jevban/models';
+  {$ENDIF}
+  { a release keeps the llama.cpp libraries next to the binary }
+  LlamaLibDir := ExtractFilePath(ParamStr(0));
+  CtxTokens := 8192;
+  NoulBias := NaN;
   JevUrl := 'http://127.0.0.1:3000/v1/systemone';
   JevModel := 'openjev';
   TimeoutMs := 8000;
@@ -247,6 +270,8 @@ begin
         LCli.Values['url'] := NextVal
       else if (LArg = '-a') or (LArg = '--action') then
         LCli.Values['type'] := NextVal
+      else if LArg = '--model' then
+        LCli.Values['local_model'] := NextVal
       else if (LArg = '-b') or (LArg = '--batch') then
         LCli.Values['batch_interval'] := NextVal
       else if LArg = '--list' then
@@ -294,6 +319,17 @@ begin
 
       Mode := LowerCase(LIni.ReadString('decider', 'mode', Mode));
       JevUrl := LIni.ReadString('decider', 'url', JevUrl);
+      LocalModel := LIni.ReadString('decider', 'local_model', LocalModel);
+      if LIni.ReadString('decider', 'model_dir', '') <> '' then
+        ModelDir := LIni.ReadString('decider', 'model_dir', '');
+      if LIni.ReadString('decider', 'llama_lib_dir', '') <> '' then
+        LlamaLibDir := LIni.ReadString('decider', 'llama_lib_dir', '');
+      Threads := LIni.ReadInteger('decider', 'threads', Threads);
+      GpuLayers := LIni.ReadInteger('decider', 'gpu_layers', GpuLayers);
+      CtxTokens := LIni.ReadInteger('decider', 'ctx', CtxTokens);
+      ReadoutT := F('readout_t', ReadoutT);
+      NoulT := F('noul_t', NoulT);
+      NoulBias := F('noul_bias', NoulBias);
       JevKey := LIni.ReadString('decider', 'api_key', JevKey);
       JevModel := LIni.ReadString('decider', 'model', JevModel);
       TimeoutMs := LIni.ReadInteger('decider', 'timeout_ms', TimeoutMs);
@@ -337,7 +373,13 @@ begin
     if LCli.Values['mode'] <> '' then
       Mode := LowerCase(LCli.Values['mode']);
     if LCli.Values['url'] <> '' then
+    begin
       JevUrl := LCli.Values['url'];
+      if LCli.Values['mode'] = '' then
+        Mode := 'jev';   { --jev-url alone means: use that server }
+    end;
+    if LCli.Values['local_model'] <> '' then
+      LocalModel := LCli.Values['local_model'];
     if LCli.Values['batch_interval'] <> '' then
       BatchInterval := StrToIntDef(LCli.Values['batch_interval'], BatchInterval);
     if LCli.Values['type'] <> '' then
@@ -371,8 +413,13 @@ begin
   IgnoreIp := ParseCidrList(IgnoreIpText);
   if (LogPaths.Count = 0) and not ListBans then
     raise EArgumentException.Create('no log to follow: set logpath in [jevban] or pass --log');
-  if (Mode <> 'jev') and (Mode <> 'rules') then
-    raise EArgumentException.CreateFmt('mode must be jev or rules, not "%s"', [Mode]);
+  if (Mode <> 'local') and (Mode <> 'jev') and (Mode <> 'rules') then
+    raise EArgumentException.CreateFmt('mode must be local, jev or rules, not "%s"', [Mode]);
+  { the hosted Jev API names its models jev-*; "openjev" is what the OpenJev helper ignores }
+  if (Pos('api.typesafe.ai', LowerCase(JevUrl)) > 0) and (JevModel = 'openjev') then
+    JevModel := 'jev-latest';
+  if CtxTokens < 1024 then
+    CtxTokens := 1024;
   if (OnError <> 'rules') and (OnError <> 'skip') then
     raise EArgumentException.CreateFmt('on_error must be rules or skip, not "%s"', [OnError]);
   if (Threshold <= 0) or (Threshold > 1) or (InstantThreshold <= 0) or (InstantThreshold > 1) then

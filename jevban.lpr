@@ -10,7 +10,7 @@ program jevban;
 {$mode objfpc}{$H+}
 
 uses
-  {$IFDEF UNIX}BaseUnix,{$ENDIF}
+  {$IFDEF UNIX}cthreads, BaseUnix,{$ENDIF}
   SysUtils, Classes,
   Ban.Config, Ban.Tail, Ban.Engine;
 
@@ -48,8 +48,8 @@ begin
   for I := 0 to Cfg.LogPaths.Count - 1 do
     if not FileExists(Cfg.LogPaths[I]) then
       raise EArgumentException.CreateFmt('%s not found', [Cfg.LogPaths[I]]);
-  Engine.Log(Format('test run over %s, mode %s%s', [Tailer.FileNames, Cfg.Mode,
-    BoolToStr(Cfg.Mode = 'jev', ' at ' + Cfg.JevUrl, '')]));
+  Engine.InitDecider;
+  Engine.Log(Format('test run over %s, decider %s', [Tailer.FileNames, Engine.Describe]));
   while Tailer.Poll(Lines) do
   begin
     for Line in Lines do
@@ -63,8 +63,8 @@ end;
 procedure RunDaemon;
 begin
   Engine.Start;
-  Engine.Log(Format('following %s; mode %s%s; action %s%s', [Tailer.FileNames, Cfg.Mode,
-    BoolToStr(Cfg.Mode = 'jev', ' at ' + Cfg.JevUrl, ''), Cfg.ActionType,
+  Engine.InitDecider;
+  Engine.Log(Format('following %s; decider %s; action %s%s', [Tailer.FileNames, Engine.Describe, Cfg.ActionType,
     BoolToStr(Cfg.DryRun, ' (dry run)', '')]));
   while not Stopping do
   begin

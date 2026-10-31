@@ -84,6 +84,8 @@ type
     FHavePlainProxy: Boolean;
     FNoProxy: string;
     FAllowPlain: Boolean;    { http:// allowed (HttpPostJson), never for downloads }
+    FLastReport: QWord;
+    procedure Progress(Sender: TObject; const AContentLength, ACurrentPos: Int64);
     procedure PickRoute(const AHost: string; ATls: Boolean = True);
     procedure GetHandler(Sender: TObject; const UseSSL: Boolean; out AHandler: TSocketHandler);
   public
@@ -358,12 +360,30 @@ begin
   AHandler := TVerifiedTlsHandler.Create(FTarget.Host, LPort, FUseProxy);
 end;
 
+procedure TDownloader.Progress(Sender: TObject; const AContentLength, ACurrentPos: Int64);
+begin
+  { a line every 10 s: a model download takes minutes }
+  if GetTickCount64 - FLastReport < 10000 then
+    Exit;
+  FLastReport := GetTickCount64;
+  if AContentLength > 0 then
+    WriteLn(StdErr, Format('[download]   %.2f / %.2f GB (%d%%)', [ACurrentPos / 1e9, AContentLength / 1e9,
+      ACurrentPos * 100 div AContentLength]))
+  else
+    WriteLn(StdErr, Format('[download]   %.2f GB', [ACurrentPos / 1e9]));
+end;
+
 procedure TDownloader.Get(const AUrl: string; AStream: TStream; AVerbose: Boolean);
 var
   LUrl, LLocation, LNext: string;
   LHop: Integer;
 begin
   LUrl := AUrl;
+  if AVerbose then
+  begin
+    FLastReport := GetTickCount64;
+    FClient.OnDataReceived := @Progress;
+  end;
   for LHop := 0 to 10 do
   begin
     FTarget := ParseURI(LUrl);

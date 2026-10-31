@@ -1,5 +1,9 @@
 # jevban: fail2ban for web attackers, judged by a Jev-style decision AI
 
+**One binary, nothing else to install.** jevban runs [OpenJev](https://huggingface.co/openjev/OpenJev-Flash-9B)
+inside itself on llama.cpp; the first start downloads the model (Flash 9B, 5.6 GB). Or point it at
+the hosted Jev API, or at your own OpenJev server.
+
 A Free Pascal command-line daemon. It follows Apache access logs, spots clients that are
 hunting for security holes, and bans them in the firewall, the way fail2ban does. The
 difference from a fail2ban filter: a regex is only the **prefilter**. A **decision model**
@@ -18,20 +22,22 @@ site. You write that in `site =` and the model weighs it. A regex can't.
 ## Download
 
 Linux x64 and Windows x64 builds are on the [Releases page](https://github.com/FMXExpress/jevban/releases).
-The Windows zip has the OpenSSL DLLs and `cacert.pem` for `https://` decider URLs, and its
-`jevban.ini` uses the `netsh` action.
+Both include the llama.cpp libraries (CPU, AVX2) for the local model. The Windows zip also has
+the OpenSSL DLLs and `cacert.pem` for `https://`, and its `jevban.ini` uses the `netsh` action.
 
 ## Build and try it
 
 ```bash
-make                   # -> build/jevban   (FPC 3.2.2; OpenSSL only for https:// decider URLs)
+make                   # -> build/jevban   (FPC 3.2.2; OpenSSL only for https://)
+make llama             # llama.cpp libraries next to it, for mode = local (git, cmake, a C++ compiler)
 make test              # unit tests + a replay of tests/sample_access.log
 ```
 
 ```bash
 ./build/jevban --test /var/log/apache2/access.log --mode rules       # what would be banned, bans nothing
-./build/jevban --test /var/log/apache2/access.log                    # the same, asking the decision API
-python3 tests/mock_jev.py 3000 &                              # a fake decider, no GPU needed
+./build/jevban --test /var/log/apache2/access.log -u http://127.0.0.1:3000/v1/systemone   # asking a server
+./build/jevban --test /var/log/apache2/access.log --model flash-9b    # OpenJev in-process (downloads 5.6 GB once)
+python3 tests/mock_jev.py 3000 &                              # a fake /v1/systemone server, for --jev-url
 ```
 
 A run over `tests/sample_access.log` (`--mode rules`):
@@ -86,7 +92,47 @@ scanners in the same 5 seconds cost 7 requests (8 clients each). `max_per_minute
 requests; past it, the signatures decide. `batch_interval = 0` with `batch_clients = 1`
 asks about each client at once, if you'd rather have the lowest latency.
 
-## The decider (Jev compatible)
+## Deciders
+
+| `mode` | What answers | Setup |
+|---|---|---|
+| `local` (default) | OpenJev in-process on llama.cpp | none: the model downloads on first start |
+| `jev` | a `/v1/systemone` server: the [hosted Jev API](https://docs.typesafe.ai/introduction) (`https://api.typesafe.ai/v1/systemone`, `api_key`) or OpenJev's helper | the server |
+| `rules` | the signatures alone | none |
+
+### Local models (`local_model` / `--model`)
+
+| Name | File | Size | Accuracy (model card) |
+|---|---|---|---|
+| `flash-9b` (default) | OpenJev-Flash-9B-Q4_K_M.gguf | 5.6 GB | 79.3% on the card's 1,789-question check (16-bit: 80.0%) |
+| `flash-9b-q5`, `-q6` | Q5_K_M, Q6_K | 6.5, 7.4 GB | |
+| `flash-9b-q8` | Q8_0 | 9.5 GB | 79.7% on the same check |
+| `27b` | OpenJev-Q4_K_M.gguf | 16.5 GB | 82.8% on its check (16-bit: 83.2%) |
+| `27b-q5`, `-q6`, `-q8` | Q5_K_M, Q6_K, Q8_0 | 19.2, 22.1, 28.6 GB | Q8_0: 82.6% |
+
+Or a path to any `.gguf`. On the 10,000-question benchmark of the model cards the 27B scores
+84.1% and Flash 9B 79.4% (vLLM, 16-bit).
+
+The local readout is OpenJev's helper (`helper/shim.py`) redone in Pascal:
+- the same prompt, the same chat template with thinking off;
+- the logits of the option letters at the first output position;
+- `softmax(logit / T)` over the options, and for yes/no `sigmoid(logit(p) / noul_t + noul_bias)`;
+- the family's calibration from the model card: Flash `T = 1.07, noul_t = 1.074766`; 27B
+  `T = 0.85, noul_t = 1.829074`.
+
+The model cards publish these for the vLLM helper. Applying them to GGUF logits is the same
+readout, but the cards don't separately validate it. Override them with `readout_t`, `noul_t`
+and `noul_bias`.
+
+Speed: a decision is one prompt of a few hundred tokens per client. On a 4-core CPU, Flash 9B
+takes tens of seconds per client, so a batch of flagged clients can take minutes. The tail keeps
+its place in the file and catches up afterwards. With a GPU, put llama.cpp libraries built with
+CUDA or Vulkan in `llama_lib_dir` and set `gpu_layers = 999`.
+
+Licence: the OpenJev weights are CC BY-NC 4.0 (non-commercial; a commercial licence from
+support@loopai.com). jevban itself is MIT, and llama.cpp is MIT.
+
+## The decider API (Jev compatible)
 
 `mode = jev` (the default) sends batches as described above to `url`. The request shape is the
 hosted Jev API's, which [OpenJev](https://huggingface.co/openjev/openjev)'s helper
@@ -200,7 +246,9 @@ let a pattern match the rotated files (`*.log.1`, `*.gz`).
 | `Ban.Tail.pas` | tail -F with rotation and wildcards |
 | `Ban.Apache.pas` | access-log parser |
 | `Ban.Signatures.pas` | the weighted regex prefilter |
-| `Ban.Jev.pas` | `/v1/systemone` client |
+| `Ban.Jev.pas` | `/v1/systemone` client, the decider interface |
+| `Ban.Local.pas` | OpenJev in-process: model download, prompt, letter readout, calibration |
+| `Ban.Llama.pas` | the llama.cpp C API, loaded at run time |
 | `Ban.Engine.pas` | per-client context, strikes, bans, state file |
 | `Ban.Firewall.pas` | action presets and command runner |
 | `Ban.Net.pas` | IPv4/IPv6 + CIDR |
