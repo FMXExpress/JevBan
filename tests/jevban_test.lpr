@@ -8,7 +8,7 @@ program jevban_test;
 
 uses
   SysUtils, Classes, Math, fpjson, jsonparser,
-  Ban.Net, Ban.Apache, Ban.Signatures, Ban.Jev, Ban.Local, Ban.Config;
+  Ban.Net, Ban.Apache, Ban.Signatures, Ban.Jev, Ban.Local, Ban.Config, Ban.BadPaths;
 
 var
   Failures: Integer = 0;
@@ -298,8 +298,39 @@ begin
   end;
 end;
 
+procedure TestBadPaths;
+var
+  B: TBadPaths;
+  LDist: Integer;
+  LNear: string;
+begin
+  Check(NormalizePath('/WP-Config.php.BAK?x=1') = '/wp-config.php.bak', 'normalize: case, query');
+  Check(NormalizePath('//a/./b//') = '/a/b', 'normalize: // /./ trailing /');
+  Check(NormalizePath('a\b') = '/a/b', 'normalize: backslash, leading /');
+  Check(BoundedLevenshtein('kitten', 'sitting', 10) = 3, 'levenshtein');
+  Check(BoundedLevenshtein('kitten', 'sitting', 1) = 2, 'levenshtein gives up past the bound');
+  Check((FuzzAllowance(5) = 0) and (FuzzAllowance(12) = 1) and (FuzzAllowance(20) = 2), 'fuzz allowance');
+  B := TBadPaths.Create;
+  try
+    B.LoadFile(ExtractFilePath(ParamStr(0)) + 'badpaths.txt');
+    Check(B.Count > 2000, 'badpaths.txt loaded: ' + IntToStr(B.Count));
+    Check(B.IsExact('/.env') and B.IsExact('/.git/config') and B.IsExact('/wp-config.php.bak'), 'exact hits');
+    Check(not B.IsExact('/') and not B.IsExact('/index.html') and not B.IsExact('/login'), 'ordinary paths');
+    LNear := B.Near('/wp-config.php.bak1', LDist);
+    Check((LNear = '/wp-config.php.bak') and (LDist = 1), 'near: ' + LNear);
+    LNear := B.Near('/phpmyadmin4', LDist);
+    Check(LNear <> '', 'near: phpmyadmin4 -> ' + LNear);
+    Check(B.Near('/.dev', LDist) = '', 'no fuzz under 8 characters');
+    Check(B.Near('/blog/hello-world', LDist) = '', 'an ordinary page is not near: ' + B.Near('/blog/hello-world', LDist));
+    Check(B.Near('/about-us', LDist) = '', 'about-us: ' + B.Near('/about-us', LDist));
+  finally
+    B.Free;
+  end;
+end;
+
 begin
   TestNet;
+  TestBadPaths;
   TestProviders;
   TestLocal;
   TestApache;

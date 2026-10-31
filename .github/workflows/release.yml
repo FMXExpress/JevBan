@@ -67,7 +67,8 @@ jobs:
           OUT="jevban-$VERSION-linux-x64"
           mkdir -p "dist/$OUT"
           strip build/jevban
-          cp build/jevban jevban.ini jevban.service README.md LICENSE "dist/$OUT/"
+          cp build/jevban jevban.ini jevban.service README.md LICENSE data/badpaths.txt "dist/$OUT/"
+          cp data/LICENSE.seclists "dist/$OUT/LICENSE.badpaths"
           cp -a llama.cpp/build/bin/lib*.so* "dist/$OUT/"
           cp llama.cpp/LICENSE "dist/$OUT/LICENSE.llama.cpp"
           tar -C dist -czf "dist/$OUT.tar.gz" "$OUT"
@@ -113,7 +114,7 @@ jobs:
           mkdir -p build/units
           "$FPC" -O2 -Sh -vewn -FUbuild/units -obuild/jevban.exe jevban.lpr
           "$FPC" -O2 -Sh -vewn -Fu. -FUbuild/units -obuild/jevban_test.exe tests/jevban_test.lpr
-          cp tests/sample_access.log build/
+          cp tests/sample_access.log data/badpaths.txt build/
           ./build/jevban_test.exe
           ./build/jevban.exe --test tests/sample_access.log --mode rules | tee out.txt
           grep -q "Ban 192.0.2.44" out.txt
@@ -129,7 +130,8 @@ jobs:
         run: |
           OUT="dist/jevban-$VERSION-windows-x64"
           mkdir -p "$OUT"
-          cp build/jevban.exe README.md LICENSE "$OUT/"
+          cp build/jevban.exe README.md LICENSE data/badpaths.txt "$OUT/"
+          cp data/LICENSE.seclists "$OUT/LICENSE.badpaths"
           cp llama.cpp/build/bin/Release/*.dll "$OUT/"
           cp llama.cpp/LICENSE "$OUT/LICENSE.llama.cpp"
           # the VC++ runtime, app-local (llama.cpp is built with the shared runtime, /MD)

@@ -6,16 +6,17 @@ BUILD    := build
 
 all: $(BUILD)/jevban
 
-$(BUILD)/jevban: *.pas jevban.lpr
+$(BUILD)/jevban: *.pas jevban.lpr data/badpaths.txt
 	@mkdir -p $(BUILD)/units
 	$(FPC) $(FPCFLAGS) -FU$(BUILD)/units -o$(BUILD)/jevban jevban.lpr
+	cp data/badpaths.txt $(BUILD)/
 
 $(BUILD)/jevban_test: *.pas tests/jevban_test.lpr
 	@mkdir -p $(BUILD)/units
 	$(FPC) $(FPCFLAGS) -Fu. -FU$(BUILD)/units -o$(BUILD)/jevban_test tests/jevban_test.lpr
 
 test: $(BUILD)/jevban $(BUILD)/jevban_test
-	cp tests/sample_access.log $(BUILD)/
+	cp tests/sample_access.log data/badpaths.txt $(BUILD)/
 	./$(BUILD)/jevban_test
 	./$(BUILD)/jevban --test tests/sample_access.log --mode rules
 

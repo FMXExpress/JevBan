@@ -66,31 +66,58 @@ It has to run as root (or with `CAP_NET_ADMIN`) to change the firewall.
 
 ## How it scans, and how often it calls the model
 
-Every log line goes through the cheap steps. Only the leftovers reach the model, and they go
-in batches:
+Cheap checks first; the model only judges what they can't settle, and it never overrules them:
 
-1. **Every line** is parsed and scored by the signatures: about 30 regexes, microseconds per
-   line. Most traffic scores 0 and stops here. The line is still kept as context: the last
-   `context_lines` requests of each client.
-2. **A flagged line** (score >= `suspicious_score`) from a client with a fresh verdict (younger
-   than `cache_secs`) reuses that verdict. No model call.
-3. **Otherwise the client is queued.** More flagged lines from a queued client join the same
-   entry; they don't add new questions.
-4. **The queue is flushed as one request** when any of these happens first:
-   - the oldest client has waited `batch_interval` seconds (default 5);
-   - `batch_lines` log lines went by (default 1000);
-   - `batch_clients` clients are queued (default 8).
+```
+decode + normalize (\xhh, %hh twice, case, // and /./)
+  → signatures (~30 weighted regexes) + known-bad paths (exact, and within 1-2 edits on a 4xx)
+      ├─ score 0                     → nothing to judge (kept as context)
+      ├─ score ≥ override_score (10) → hard rule: a strike now, the model is not asked
+      └─ in between                  → the model, in batches
+            p ≥ instant_threshold (0.97) → ban    p ≥ threshold (0.80) → strike
+            p ≥ review_threshold (0.5)   → REVIEW in the log, no strike
+  → maxretry strikes within findtime → ban
+```
 
-   That one `POST /v1/systemone` holds every queued client in `state.clients` and asks one
-   yes/no question per client (`c1`, `c2`, ...). The decision server reads the shared state
-   once (prefix cache) and answers all of them.
-5. Each flagged request of a client gets that client's probability. With the default
-   `maxretry`, a scanner that sent 3 probes inside the window comes out of one batch banned.
+1. **Every line** is decoded, parsed and scored. Most traffic scores 0 and stops here; the
+   line is still kept as context (the last `context_lines` requests of each client).
+2. **Known-bad paths** (`badpaths.txt`, 2,454 paths scanners probe for, from SecLists'
+   `quickhits`): a 4xx on one is a probe (+6); a 2xx means the path exists on your site, which
+   the model weighs (+3); a 4xx within 1 edit (paths of 8–15 characters) or 2 edits (16+) of
+   one is a variant (+3): `/phpinfo2.php`, `/adminer2.php`, `/wp-config.php.save1`. Encodings
+   are undone before any of this, so `/%2e%65%6e%76` is `/.env`.
+3. **Hard rules** (score ≥ `override_score`, the weight-10 signatures: `/.env`, `../`,
+   `${jndi:`, `union select`, sqlmap…) are strikes at once, without a model call. An obvious
+   scanner trying 30 URLs is banned at its third probe, while it is still probing.
+4. **The middle ground** goes to the model: a fresh verdict for the client (younger than
+   `cache_secs`) is reused; otherwise the client is queued, and the queue is flushed as one
+   request when any of these comes first: the oldest client has waited `batch_interval`
+   seconds (default 5), `batch_lines` log lines went by (1000), `batch_clients` clients are
+   queued (8). That one request carries every queued client with one yes/no question each.
+5. **REVIEW**: a probability between `review_threshold` and `threshold` is logged as `REVIEW`,
+   with no strike, for you to audit.
 
-Example: a scanner firing 200 probes in 10 seconds costs 2 questions, not 200 calls. 50
-scanners in the same 5 seconds cost 7 requests (8 clients each). `max_per_minute` caps the
-requests; past it, the signatures decide. `batch_interval = 0` with `batch_clients = 1`
-asks about each client at once, if you'd rather have the lowest latency.
+A scanner firing 200 probes in 10 seconds costs at most 2 questions, not 200 calls.
+`max_per_minute` caps the requests; past it, the signatures decide.
+
+### Trying the model before it bans: `--eval` and shadow mode
+
+```bash
+jevban --eval tests/labeled_access.log            # labelled replay: rules vs the live pipeline
+jevban --shadow                                   # live: the model is asked and logged, the rules ban
+```
+
+`--eval` takes a log whose lines are `attack<TAB>log line` or `benign<TAB>log line` and prints,
+per request, the strike decisions of the signatures alone and of the live pipeline (TP, FP,
+FN, TN, precision, recall), the requests stopped by bans, and the attackers and benign clients
+banned. Label a day of your own log to see what the model adds before you trust it.
+`tests/labeled_access.log` is a synthetic WordPress site: scanners (obvious, variant-only,
+plugin probes), a password guesser, one-shot exploits, and benign crawlers, visitors with
+common 404s, an uptime monitor using curl, the owner logging in.
+
+With `shadow = 1`, the live daemon asks the model and logs every verdict next to the rules'
+decision (`(shadow: model says strike)`), but only the rules ban; run it for a while and
+compare.
 
 ## Deciders
 
@@ -277,6 +304,8 @@ let a pattern match the rotated files (`*.log.1`, `*.gz`).
 | `Ban.Tail.pas` | tail -F with rotation and wildcards |
 | `Ban.Apache.pas` | access-log parser |
 | `Ban.Signatures.pas` | the weighted regex prefilter |
+| `Ban.BadPaths.pas` | known-bad paths: exact, and near (bounded Levenshtein over a BK-tree) |
+| `data/badpaths.txt` | 2,454 paths scanners probe for (SecLists quickhits, MIT; `data/LICENSE.seclists`) |
 | `Ban.Jev.pas` | `/v1/systemone` client, the decider interface |
 | `Ban.Local.pas` | OpenJev in-process: model download, prompt, letter readout, calibration |
 | `Ban.Llama.pas` | the llama.cpp C API, loaded at run time |

@@ -18,17 +18,45 @@ unit Ban.Engine;
 
    A verdict is reused for cache_secs, so a scanner firing 200 probes is one
    question in one batch, not 200 calls; past max_per_minute requests the
-   rules decide. Bans survive a restart in the state file. *)
+   rules decide. Bans survive a restart in the state file.
+
+   The model never overrides the hard rules: a request scoring override_score
+   (the weight-10 signatures: /.env, ../, ${jndi:, union select, sqlmap) is a
+   strike at once, without a question, so an obvious scanner is banned while
+   it is still probing. The model judges the middle ground, and a p between
+   review_threshold and threshold is logged as REVIEW. With shadow = 1 the
+   model's verdicts are only logged; the rules ban. --eval replays a labelled
+   log and counts both against the labels. *)
 
 {$mode objfpc}{$H+}
 
 interface
 
 uses
-  SysUtils, Classes, Math, fpjson, jsonparser,
-  Ban.Net, Ban.Apache, Ban.Signatures, Ban.Jev, Ban.Local, Ban.Firewall, Ban.Config;
+  SysUtils, Classes, Math, Contnrs, fpjson, jsonparser,
+  Ban.Net, Ban.Apache, Ban.Signatures, Ban.BadPaths, Ban.Jev, Ban.Local, Ban.Firewall, Ban.Config;
+
+const
+  { --eval labels }
+  CTruthUnknown = -1;
+  CTruthBenign = 0;
+  CTruthAttack = 1;
 
 type
+  { a flagged request waiting for the decider }
+  TPendingLine = class
+  public
+    Summary: string;
+    Tags: string;
+    Score: Integer;
+    Truth: Integer;
+  end;
+
+  { true/false positives and negatives of strike decisions, per request }
+  TConfusion = record
+    TP, FP, FN, TN: Int64;
+  end;
+
   TClient = class
   public
     IpText: string;
@@ -41,9 +69,8 @@ type
     VerdictAt: Int64;        { 0 = no verdict yet }
     VerdictMal: Double;
     VerdictIntent: string;
-    Pending: TStringList;    { flagged requests waiting for the batch; Objects = score }
-    PendingTags: TStringList;    { all tags of the pending requests (sent to the decider) }
-    PendingLineTags: TStringList;  { per pending request, for the log }
+    Pending: TFPObjectList;  { TPendingLine waiting for the batch }
+    PendingTags: TStringList;  { all tags of the pending requests (sent to the decider) }
     PendingSince: Int64;
     Queued: Boolean;
     constructor Create;
@@ -62,8 +89,8 @@ type
   end;
 
   TBanStats = record
-    Lines, Parsed, Ignored, Suspicious, DeciderCalls, DeciderClients, DeciderErrors, Strikes, Bans,
-      Unbans: Int64;
+    Lines, Parsed, Ignored, Suspicious, HardRules, DeciderCalls, DeciderClients, DeciderErrors,
+      Reviews, Strikes, Bans, Unbans: Int64;
   end;
 
   TBanEngine = class
@@ -84,11 +111,18 @@ type
     FQueue: TList;           { TClient waiting for the next batch, oldest first }
     FLinesSinceFlush: Integer;
     FLastNow: Int64;
+    FBad: TBadPaths;         { nil when badpaths = off }
+    { --eval: strike decisions per labelled request, rules alone and the whole pipeline }
+    FEvalRules, FEvalLive: TConfusion;
+    FEvalAfterBan: array[CTruthBenign..CTruthAttack] of Int64;
+    FEvalClients: TStringList;   { ip -> Objects: 1 = sent an attack, 2 = sent benign requests }
+    procedure Count(var AConf: TConfusion; ATruth: Integer; AStrike: Boolean);
     function GetClient(const E: TAccessEntry; ANow: Int64): TClient;
-    procedure Judge(C: TClient; const ASummary: string; AScore: Integer; ATags: TStrings; ANow: Int64);
-    procedure ApplyVerdict(C: TClient; AMal: Double; const AIntent: string; AScore: Integer;
-      const ATags, ASummary, AHow: string; ANow: Int64);
-    procedure ApplyRules(C: TClient; AScore: Integer; const ATags, ASummary, AHow: string; ANow: Int64);
+    procedure Judge(C: TClient; const ASummary, ATags: string; AScore, ATruth: Integer; ANow: Int64);
+    { the one place a flagged request is decided. AMal < 0: no model verdict
+      (rules mode, a hard rule, the decider unavailable) }
+    procedure Decide(C: TClient; const ASummary, ATags: string; AScore, ATruth: Integer; AMal: Double;
+      const AIntent, AHow: string; ANow: Int64);
     function IsBanned(const AIp: string): Boolean;
     procedure MaybeFlush(ANow: Int64);
     procedure Flush(ANow: Int64);
@@ -106,7 +140,10 @@ type
     procedure Start;
     { state, actionstop when cleanup_on_exit }
     procedure Stop;
-    procedure Feed(const ALine: string);
+    { ATruth: a --eval label (CTruth*) }
+    procedure Feed(const ALine: string; ATruth: Integer = CTruthUnknown);
+    { --eval: the counts against the labels }
+    procedure EvalReport;
     { unbans the expired, forgets idle clients, saves the state }
     procedure Tick;
     { the remote client, or the local model (downloaded on first use); on
@@ -127,14 +164,12 @@ constructor TClient.Create;
 begin
   inherited Create;
   Recent := TStringList.Create;
-  Pending := TStringList.Create;
+  Pending := TFPObjectList.Create(True);
   PendingTags := TStringList.Create;
-  PendingLineTags := TStringList.Create;
 end;
 
 destructor TClient.Destroy;
 begin
-  PendingLineTags.Free;
   PendingTags.Free;
   Pending.Free;
   Recent.Free;
@@ -151,6 +186,13 @@ begin
   if FCfg.SignatureFile <> '' then
     FSigs.LoadFile(FCfg.SignatureFile);
   FQueue := TList.Create;
+  if FCfg.BadPathsFile <> '' then
+  begin
+    FBad := TBadPaths.Create;
+    FBad.LoadFile(FCfg.BadPathsFile);
+  end;
+  FEvalClients := TStringList.Create;
+  FEvalClients.Sorted := True;
   FAction := TBanAction.Create(@Log);
   FAction.Kind := FCfg.ActionType;
   FAction.Name := FCfg.ActionName;
@@ -182,6 +224,8 @@ end;
 destructor TBanEngine.Destroy;
 begin
   FLog.Free;
+  FEvalClients.Free;
+  FBad.Free;
   FQueue.Free;
   FBans.Free;
   FClients.Free;
@@ -233,14 +277,14 @@ begin
   FClients.AddObject(E.IpText, Result);
 end;
 
-procedure TBanEngine.Feed(const ALine: string);
+procedure TBanEngine.Feed(const ALine: string; ATruth: Integer);
 var
   E: TAccessEntry;
   C: TClient;
   LNow: Int64;
   LTags: TStringList;
-  LScore, I: Integer;
-  LSummary: string;
+  LScore, I, LDist: Integer;
+  LSummary, LPath, LNear: string;
 begin
   Inc(Stats.Lines);
   if not ParseAccessLine(ALine, E) then
@@ -255,6 +299,13 @@ begin
     Inc(Stats.Ignored);
     Exit;
   end;
+  if ATruth <> CTruthUnknown then
+  begin
+    I := FEvalClients.IndexOf(E.IpText);
+    if I < 0 then
+      I := FEvalClients.AddObject(E.IpText, nil);
+    FEvalClients.Objects[I] := TObject(PtrInt(FEvalClients.Objects[I]) or IfThen(ATruth = CTruthAttack, 1, 2));
+  end;
   { replaying a file (--test) runs on the log's clock, live on the wall clock }
   if FCfg.TestMode and (E.Epoch > 0) then
     LNow := E.Epoch
@@ -263,9 +314,13 @@ begin
   FLastNow := LNow;
   if FQueue.Count > 0 then
     Inc(FLinesSinceFlush);
-  I := FBans.IndexOf(E.IpText);
-  if (I >= 0) and TBanRecord(FBans.Objects[I]).Active then
-    Exit;   { already banned: a connection that was open before the ban }
+  if IsBanned(E.IpText) then
+  begin
+    { already banned: a connection that was open before the ban }
+    if ATruth <> CTruthUnknown then
+      Inc(FEvalAfterBan[ATruth]);
+    Exit;
+  end;
   C := GetClient(E, LNow);
   C.LastSeen := LNow;
   LSummary := EntrySummary(E);
@@ -273,6 +328,35 @@ begin
   try
     LTags.Duplicates := dupIgnore;
     LScore := FSigs.Score(E, LTags);
+    if FBad <> nil then
+    begin
+      { a known-bad path: a probe when it is not there, the decider's call when it is }
+      LPath := NormalizePath(E.Decoded);
+      if FBad.IsExact(LPath) then
+      begin
+        if E.Status >= 400 then
+        begin
+          Inc(LScore, 6);
+          LTags.Add('known-bad-path');
+        end
+        else
+        begin
+          Inc(LScore, 3);
+          LTags.Add('known-bad-path-served');
+        end;
+      end
+      else if (E.Status >= 400) and (E.Status < 500) then
+      begin
+        LNear := FBad.Near(LPath, LDist);
+        if LNear <> '' then
+        begin
+          Inc(LScore, 3);
+          LTags.Add('near-known-bad');
+          if FCfg.Verbose then
+            Log(Format('%s %s is %d edit(s) from %s', [E.IpText, LPath, LDist, LNear]));
+        end;
+      end;
+    end;
     if (FCfg.Flood4xx > 0) and (E.Status >= 400) and (E.Status < 500) then
     begin
       if LNow - C.FloodStart > FCfg.FindTime then
@@ -290,7 +374,13 @@ begin
     if LScore >= FCfg.SuspiciousScore then
     begin
       Inc(Stats.Suspicious);
-      Judge(C, LSummary, LScore, LTags, LNow);
+      Judge(C, LSummary, LTags.CommaText, LScore, ATruth, LNow);
+    end
+    else if ATruth <> CTruthUnknown then
+    begin
+      { not flagged: neither rules nor model strike }
+      Count(FEvalRules, ATruth, False);
+      Count(FEvalLive, ATruth, False);
     end;
   finally
     LTags.Free;
@@ -309,19 +399,27 @@ begin
   Result := (I >= 0) and TBanRecord(FBans.Objects[I]).Active;
 end;
 
-procedure TBanEngine.Judge(C: TClient; const ASummary: string; AScore: Integer; ATags: TStrings;
-  ANow: Int64);
+procedure TBanEngine.Judge(C: TClient; const ASummary, ATags: string; AScore, ATruth: Integer; ANow: Int64);
 var
+  LLine: TPendingLine;
   LTag: string;
+  LTagList: TStringList;
 begin
   if FDecider = nil then
   begin
-    ApplyRules(C, AScore, ATags.CommaText, ASummary, 'rules', ANow);
+    Decide(C, ASummary, ATags, AScore, ATruth, -1, '', 'rules', ANow);
+    Exit;
+  end;
+  { the model never overrides a hard rule, and is not asked about one }
+  if (FCfg.OverrideScore > 0) and (AScore >= FCfg.OverrideScore) then
+  begin
+    Inc(Stats.HardRules);
+    Decide(C, ASummary, ATags, AScore, ATruth, -1, '', 'hard rule', ANow);
     Exit;
   end;
   if (C.VerdictAt > 0) and (ANow - C.VerdictAt < FCfg.CacheSecs) and not C.Queued then
   begin
-    ApplyVerdict(C, C.VerdictMal, C.VerdictIntent, AScore, ATags.CommaText, ASummary, FCfg.Mode + ' (cached)', ANow);
+    Decide(C, ASummary, ATags, AScore, ATruth, C.VerdictMal, C.VerdictIntent, FCfg.Mode + ' (cached)', ANow);
     Exit;
   end;
   { the next batch decides }
@@ -331,66 +429,105 @@ begin
     C.PendingSince := ANow;
     FQueue.Add(C);
   end;
-  if C.Pending.Count < 2 * FCfg.ContextLines then
-  begin
-    C.Pending.AddObject(ASummary, TObject(PtrInt(AScore)));
-    C.PendingLineTags.Add(ATags.CommaText);
+  LLine := TPendingLine.Create;
+  LLine.Summary := ASummary;
+  LLine.Tags := ATags;
+  LLine.Score := AScore;
+  LLine.Truth := ATruth;
+  C.Pending.Add(LLine);
+  LTagList := TStringList.Create;
+  try
+    LTagList.CommaText := ATags;
+    for LTag in LTagList do
+      if C.PendingTags.IndexOf(LTag) < 0 then
+        C.PendingTags.Add(LTag);
+  finally
+    LTagList.Free;
   end;
-  for LTag in ATags do
-    if C.PendingTags.IndexOf(LTag) < 0 then
-      C.PendingTags.Add(LTag);
   if FCfg.Verbose then
     Log(Format('%s queued (%d in batch) score=%d [%s]: %s', [C.IpText, FQueue.Count, AScore,
-      ATags.CommaText, Copy(ASummary, 1, 300)]));
+      ATags, Copy(ASummary, 1, 300)]));
 end;
 
-procedure TBanEngine.ApplyVerdict(C: TClient; AMal: Double; const AIntent: string; AScore: Integer;
-  const ATags, ASummary, AHow: string; ANow: Int64);
-var
-  LStrike, LInstant: Boolean;
-  LHow, LVerdict: string;
+procedure TBanEngine.Count(var AConf: TConfusion; ATruth: Integer; AStrike: Boolean);
 begin
-  LHow := AHow;
-  LStrike := AMal >= FCfg.Threshold;
-  LInstant := AMal >= FCfg.InstantThreshold;
-  if (FCfg.OverrideScore > 0) and (AScore >= FCfg.OverrideScore) and not LStrike then
+  if ATruth = CTruthAttack then
   begin
-    LStrike := True;
-    LHow := LHow + ', score override';
+    if AStrike then
+      Inc(AConf.TP)
+    else
+      Inc(AConf.FN);
+  end
+  else if ATruth = CTruthBenign then
+  begin
+    if AStrike then
+      Inc(AConf.FP)
+    else
+      Inc(AConf.TN);
   end;
-  if LInstant then
-    LVerdict := 'BAN'
-  else if LStrike then
-    LVerdict := Format('strike %d/%d', [Length(C.Strikes) + 1, FCfg.MaxRetry])
-  else
-    LVerdict := 'pass';
-  if FCfg.Verbose or FCfg.TestMode or LStrike then
-    Log(Format('%s %s score=%d [%s] p=%.2f%s via %s: %s', [C.IpText, LVerdict, AScore, ATags, AMal,
-      BoolToStr(AIntent <> '', ' intent=' + AIntent, ''), LHow, Copy(ASummary, 1, 300)]));
-  if LStrike then
-    AddStrike(C, ANow, LInstant, Format('%s, p=%.2f%s', [ATags, AMal,
-      BoolToStr(AIntent <> '', ' ' + AIntent, '')]));
 end;
 
-procedure TBanEngine.ApplyRules(C: TClient; AScore: Integer; const ATags, ASummary, AHow: string;
-  ANow: Int64);
+procedure TBanEngine.Decide(C: TClient; const ASummary, ATags: string; AScore, ATruth: Integer; AMal: Double;
+  const AIntent, AHow: string; ANow: Int64);
 var
-  LStrike, LInstant: Boolean;
-  LVerdict: string;
+  LRulesStrike, LRulesInstant, LModelStrike, LModelInstant, LReview, LStrike, LInstant: Boolean;
+  LVerdict, LModel, LReason: string;
 begin
-  LStrike := AScore >= FCfg.RulesMinScore;
-  LInstant := AScore >= FCfg.RulesInstantScore;
+  LRulesStrike := AScore >= FCfg.RulesMinScore;
+  LRulesInstant := AScore >= FCfg.RulesInstantScore;
+  LModelStrike := (AMal >= 0) and (AMal >= FCfg.Threshold);
+  LModelInstant := (AMal >= 0) and (AMal >= FCfg.InstantThreshold);
+  LReview := (AMal >= 0) and not LModelStrike and (FCfg.ReviewThreshold > 0) and (AMal >= FCfg.ReviewThreshold);
+  if (AMal < 0) or FCfg.Shadow then
+  begin
+    LStrike := LRulesStrike;
+    LInstant := LRulesInstant;
+  end
+  else
+  begin
+    LStrike := LModelStrike;
+    LInstant := LModelInstant;
+  end;
+  Count(FEvalRules, ATruth, LRulesStrike);
+  Count(FEvalLive, ATruth, LStrike);
+
   if LInstant then
     LVerdict := 'BAN'
   else if LStrike then
     LVerdict := Format('strike %d/%d', [Length(C.Strikes) + 1, FCfg.MaxRetry])
+  else if LReview and not FCfg.Shadow then
+    LVerdict := 'REVIEW'
   else
     LVerdict := 'pass';
-  if FCfg.Verbose or FCfg.TestMode or LStrike then
-    Log(Format('%s %s score=%d [%s] via %s: %s', [C.IpText, LVerdict, AScore, ATags, AHow,
+  if LReview then
+    Inc(Stats.Reviews);
+  LModel := '';
+  if AMal >= 0 then
+  begin
+    LModel := Format(' p=%.2f%s', [AMal, BoolToStr(AIntent <> '', ' intent=' + AIntent, '')]);
+    if FCfg.Shadow then
+    begin
+      if LModelInstant then
+        LModel := LModel + ' (shadow: model says BAN)'
+      else if LModelStrike then
+        LModel := LModel + ' (shadow: model says strike)'
+      else if LReview then
+        LModel := LModel + ' (shadow: model says REVIEW)'
+      else
+        LModel := LModel + ' (shadow: model says pass)';
+    end;
+  end;
+  if FCfg.Verbose or FCfg.TestMode or LStrike or LReview or (FCfg.Shadow and (LModelStrike <> LStrike)) then
+    Log(Format('%s %s score=%d [%s]%s via %s: %s', [C.IpText, LVerdict, AScore, ATags, LModel, AHow,
       Copy(ASummary, 1, 300)]));
   if LStrike then
-    AddStrike(C, ANow, LInstant, Format('%s, score %d', [ATags, AScore]));
+  begin
+    if (AMal >= 0) and not FCfg.Shadow then
+      LReason := Format('%s, p=%.2f%s', [ATags, AMal, BoolToStr(AIntent <> '', ' ' + AIntent, '')])
+    else
+      LReason := Format('%s, score %d', [ATags, AScore]);
+    AddStrike(C, ANow, LInstant, LReason);
+  end;
 end;
 
 procedure TBanEngine.MaybeFlush(ANow: Int64);
@@ -406,6 +543,7 @@ procedure TBanEngine.Flush(ANow: Int64);
 var
   LClients, LItems: TList;
   LItem: TJevItem;
+  LLine: TPendingLine;
   C: TClient;
   I, J: Integer;
   LOk: Boolean;
@@ -429,9 +567,11 @@ begin
         LItem := TJevItem.Create;
         LItem.Ip := C.IpText;
         LItem.Hits := C.PendingTags.CommaText;
-        LItem.Flagged.Assign(C.Pending);
+        { the model sees the latest flagged requests; all of them get its verdict }
+        for J := Max(0, C.Pending.Count - 2 * FCfg.ContextLines) to C.Pending.Count - 1 do
+          LItem.Flagged.Add(TPendingLine(C.Pending[J]).Summary);
         for J := 0 to C.Recent.Count - 1 do
-          if C.Pending.IndexOf(C.Recent[J]) < 0 then
+          if LItem.Flagged.IndexOf(C.Recent[J]) < 0 then
             LItem.Earlier.Add(C.Recent[J]);
         LItems.Add(LItem);
       end;
@@ -442,6 +582,7 @@ begin
         FMinuteCalls := 0;
       end;
       LOk := False;
+      LError := '';
       if FMinuteCalls >= FCfg.MaxPerMinute then
       begin
         LError := 'rate limit';
@@ -484,20 +625,28 @@ begin
         end;
         for J := 0 to C.Pending.Count - 1 do
         begin
+          LLine := TPendingLine(C.Pending[J]);
           if IsBanned(C.IpText) then
-            Break;
+          begin
+            if LLine.Truth <> CTruthUnknown then
+              Inc(FEvalAfterBan[LLine.Truth]);
+            Continue;
+          end;
           if LOk then
-            ApplyVerdict(C, LItem.Malicious, LItem.Intent, PtrInt(C.Pending.Objects[J]),
-              C.PendingLineTags[J], C.Pending[J], LHow, ANow)
+            Decide(C, LLine.Summary, LLine.Tags, LLine.Score, LLine.Truth, LItem.Malicious, LItem.Intent,
+              LHow, ANow)
           else if (LError = 'rate limit') or (FCfg.OnError = 'rules') then
-            ApplyRules(C, PtrInt(C.Pending.Objects[J]), C.PendingLineTags[J], C.Pending[J], LHow, ANow)
-          else if FCfg.Verbose or FCfg.TestMode then
-            Log(Format('%s pass [%s] via %s: %s', [C.IpText, C.PendingLineTags[J], LHow,
-              Copy(C.Pending[J], 1, 300)]));
+            Decide(C, LLine.Summary, LLine.Tags, LLine.Score, LLine.Truth, -1, '', LHow, ANow)
+          else
+          begin
+            Count(FEvalRules, LLine.Truth, LLine.Score >= FCfg.RulesMinScore);
+            Count(FEvalLive, LLine.Truth, False);
+            if FCfg.Verbose or FCfg.TestMode then
+              Log(Format('%s pass [%s] via %s: %s', [C.IpText, LLine.Tags, LHow, Copy(LLine.Summary, 1, 300)]));
+          end;
         end;
         C.Pending.Clear;
         C.PendingTags.Clear;
-        C.PendingLineTags.Clear;
         C.Queued := False;
       end;
     end;
@@ -559,6 +708,62 @@ begin
     Result := FDecider.Describe
   else
     Result := 'rules';
+end;
+
+procedure TBanEngine.EvalReport;
+
+  function Pct(A, B: Int64): string;
+  begin
+    if B = 0 then
+      Result := '   -  '
+    else
+      Result := Format('%5.1f%%', [100 * A / B]);
+  end;
+
+  procedure Row(const AName: string; const C: TConfusion);
+  begin
+    WriteLn(Format('  %-22s %5d %5d %5d %5d   %s   %s', [AName, C.TP, C.FP, C.FN, C.TN,
+      Pct(C.TP, C.TP + C.FP), Pct(C.TP, C.TP + C.FN)]));
+  end;
+
+var
+  I, LAttack, LBenign, LAttackBanned, LBenignBanned: Integer;
+  LBanned: Boolean;
+  LFlags: PtrInt;
+begin
+  WriteLn;
+  WriteLn('Strike decisions per labelled request (attack = positive):');
+  WriteLn('                            TP    FP    FN    TN   precision  recall');
+  Row('signatures only', FEvalRules);
+  if FDecider <> nil then
+    Row(BoolToStr(FCfg.Shadow, 'live (shadow: rules)', 'live (hard rules+model)'), FEvalLive)
+  else
+    Row('live (rules)', FEvalLive);
+  WriteLn(Format('  requests after the client was banned: %d attack (stopped), %d benign (lost)',
+    [FEvalAfterBan[CTruthAttack], FEvalAfterBan[CTruthBenign]]));
+  LAttack := 0;
+  LBenign := 0;
+  LAttackBanned := 0;
+  LBenignBanned := 0;
+  for I := 0 to FEvalClients.Count - 1 do
+  begin
+    LFlags := PtrInt(FEvalClients.Objects[I]);
+    LBanned := FBans.IndexOf(FEvalClients[I]) >= 0;
+    if LFlags and 1 <> 0 then
+    begin
+      Inc(LAttack);
+      Inc(LAttackBanned, Ord(LBanned));
+    end
+    else
+    begin
+      Inc(LBenign);
+      Inc(LBenignBanned, Ord(LBanned));
+    end;
+  end;
+  WriteLn(Format('Clients: %d of %d attackers banned; %d of %d benign clients banned (false bans)',
+    [LAttackBanned, LAttack, LBenignBanned, LBenign]));
+  WriteLn(Format('Model: %d hard-rule decisions without it, %d requests to it for %d clients, %d REVIEW',
+    [Stats.HardRules, Stats.DeciderCalls, Stats.DeciderClients, Stats.Reviews]));
 end;
 
 procedure TBanEngine.FlushAll;
@@ -850,10 +1055,10 @@ end;
 
 function TBanEngine.Summary: string;
 begin
-  Result := Format('%d lines, %d parsed, %d ignored, %d suspicious, %d decider requests for %d ' +
-    'clients (%d failed), %d strikes, %d bans, %d unbans', [Stats.Lines, Stats.Parsed, Stats.Ignored,
-    Stats.Suspicious, Stats.DeciderCalls, Stats.DeciderClients, Stats.DeciderErrors, Stats.Strikes,
-    Stats.Bans, Stats.Unbans]);
+  Result := Format('%d lines, %d parsed, %d ignored, %d suspicious, %d by hard rules, %d decider ' +
+    'requests for %d clients (%d failed), %d review, %d strikes, %d bans, %d unbans', [Stats.Lines,
+    Stats.Parsed, Stats.Ignored, Stats.Suspicious, Stats.HardRules, Stats.DeciderCalls, Stats.DeciderClients,
+    Stats.DeciderErrors, Stats.Reviews, Stats.Strikes, Stats.Bans, Stats.Unbans]);
 end;
 
 end.

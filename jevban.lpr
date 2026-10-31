@@ -46,9 +46,31 @@ begin
 end;
 {$ENDIF}
 
+{ --eval lines: "attack<TAB>log line" or "benign<TAB>log line" }
+function SplitLabel(const ALine: string; out ATruth: Integer): string;
+var
+  LTab: Integer;
+  LLabel: string;
+begin
+  ATruth := CTruthUnknown;
+  Result := ALine;
+  LTab := Pos(#9, ALine);
+  if LTab = 0 then
+    Exit;
+  LLabel := LowerCase(Trim(Copy(ALine, 1, LTab - 1)));
+  if LLabel = 'attack' then
+    ATruth := CTruthAttack
+  else if LLabel = 'benign' then
+    ATruth := CTruthBenign
+  else
+    Exit;
+  Result := Copy(ALine, LTab + 1, MaxInt);
+end;
+
 procedure RunTest;
 var
-  I: Integer;
+  I, LTruth: Integer;
+  LText: string;
 begin
   for I := 0 to Cfg.LogPaths.Count - 1 do
     if not FileExists(Cfg.LogPaths[I]) then
@@ -61,12 +83,22 @@ begin
     begin
       if Stopping then
         Break;
-      Engine.Feed(Line);
+      if Cfg.EvalMode then
+      begin
+        if (Line = '') or (Line[1] = '#') then
+          Continue;
+        LText := SplitLabel(Line, LTruth);
+        Engine.Feed(LText, LTruth);
+      end
+      else
+        Engine.Feed(Line);
     end;
     Lines.Clear;
   end;
   Engine.FlushAll;
   Engine.Log(Engine.Summary);
+  if Cfg.EvalMode then
+    Engine.EvalReport;
 end;
 
 procedure RunDaemon;

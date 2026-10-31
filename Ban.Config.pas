@@ -62,7 +62,10 @@ type
     OnError: string;          { rules | skip }
     RulesMinScore: Integer;   { rules: a strike }
     RulesInstantScore: Integer;
-    OverrideScore: Integer;   { jev mode: a score this high is a strike whatever the model says; 0 = off }
+    OverrideScore: Integer;   { a score this high is a strike without asking the model; 0 = off }
+    ReviewThreshold: Double;  { a p from here up to threshold is logged as REVIEW; 0 = off }
+    Shadow: Boolean;          { the model's verdicts are logged only; the rules ban }
+    BadPathsFile: string;     { known-bad paths ('' = off) }
     Site: string;
     Question: string;
     { [action] }
@@ -75,6 +78,7 @@ type
     CleanupOnExit: Boolean;
     { command line only }
     TestMode: Boolean;
+    EvalMode: Boolean;        { --eval: TestMode on a labelled log }
     ListBans: Boolean;
     constructor Create;
     destructor Destroy; override;
@@ -146,6 +150,9 @@ begin
   WriteLn('  -l, --log FILE         access log or wildcard pattern to follow (repeatable; replaces logpath)');
   WriteLn('      --from-start       read the logs from their start, not just new lines');
   WriteLn('  -t, --test FILE        read FILE once, print each decision, ban nothing (like fail2ban-regex)');
+  WriteLn('      --eval FILE        replay a labelled log ("attack<TAB>line" / "benign<TAB>line") and count');
+  WriteLn('                         the strike decisions of the signatures and of the live pipeline');
+  WriteLn('      --shadow           ask the model and log its verdicts, but let the signatures ban');
   WriteLn('  -n, --dry-run          log the firewall commands instead of running them');
   WriteLn('  -m, --mode MODE        local (OpenJev in-process, the default) | jev (a /v1/systemone server)');
   WriteLn('                         | rules (signatures only)');
@@ -214,7 +221,9 @@ begin
   OnError := 'rules';
   RulesMinScore := 6;
   RulesInstantScore := 20;
-  OverrideScore := 0;
+  OverrideScore := 10;
+  ReviewThreshold := 0.5;
+  BadPathsFile := ExtractFilePath(ParamStr(0)) + 'badpaths.txt';
   Site := CDefaultSite;
   Question := CDefaultQuestion;
   {$IFDEF WINDOWS}
@@ -324,6 +333,14 @@ begin
         LCli.Values['local_model'] := NextVal
       else if (LArg = '-b') or (LArg = '--batch') then
         LCli.Values['batch_interval'] := NextVal
+      else if LArg = '--eval' then
+      begin
+        LCliLogs.Add(NextVal);
+        TestMode := True;
+        EvalMode := True;
+      end
+      else if LArg = '--shadow' then
+        LCli.Values['shadow'] := '1'
       else if LArg = '--list' then
         ListBans := True
       else if (LArg = '-v') or (LArg = '--verbose') then
@@ -400,6 +417,10 @@ begin
       RulesMinScore := LIni.ReadInteger('decider', 'rules_min_score', RulesMinScore);
       RulesInstantScore := LIni.ReadInteger('decider', 'rules_instant_score', RulesInstantScore);
       OverrideScore := LIni.ReadInteger('decider', 'override_score', OverrideScore);
+      ReviewThreshold := F('review_threshold', ReviewThreshold);
+      Shadow := LIni.ReadBool('decider', 'shadow', Shadow);
+      if Trim(LIni.ReadString('jevban', 'badpaths', '')) <> '' then
+        BadPathsFile := Trim(LIni.ReadString('jevban', 'badpaths', ''));
       Site := LIni.ReadString('decider', 'site', Site);
       Question := LIni.ReadString('decider', 'question', Question);
 
@@ -423,6 +444,8 @@ begin
     LVal := LCli.Values['from_start'];
     if LVal <> '' then
       FromStart := True;
+    if LCli.Values['shadow'] <> '' then
+      Shadow := True;
     if LCli.Values['dry_run'] <> '' then
       DryRun := True;
     if LCli.Values['mode'] <> '' then
@@ -520,6 +543,15 @@ begin
       if CProviders[I].Name = Provider then
         raise EArgumentException.CreateFmt('provider %s needs an API key: set api_key in [decider], or %s ' +
           'or JEV_API_KEY in the environment', [Provider, CProviders[I].KeyEnv]);
+  if SameText(BadPathsFile, 'off') then
+    BadPathsFile := ''
+  else if (BadPathsFile <> '') and not FileExists(BadPathsFile) then
+  begin
+    { the default next to the binary is optional; a configured one is not }
+    if BadPathsFile <> ExtractFilePath(ParamStr(0)) + 'badpaths.txt' then
+      raise EArgumentException.CreateFmt('badpaths file %s not found', [BadPathsFile]);
+    BadPathsFile := '';
+  end;
   if CtxTokens < 1024 then
     CtxTokens := 1024;
   if (OnError <> 'rules') and (OnError <> 'skip') then
