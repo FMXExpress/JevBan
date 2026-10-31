@@ -1,0 +1,177 @@
+name: release
+
+# Push a tag v*, or run the workflow by hand with a version, to build and publish a release:
+#   jevban-<ver>-linux-x64.tar.gz      jevban + llama.cpp libraries, jevban.ini, jevban.service
+#   jevban-<ver>-windows-x64.zip       jevban.exe + llama.cpp DLLs + OpenSSL 3 DLLs + cacert.pem,
+#                                      netsh preset
+# Both run OpenJev in-process (the model downloads on first start). The local-model smoke test
+# uses a small GGUF of the same tokenizer family (Qwen3 0.6B) so CI does not fetch 5.6 GB.
+# Each binary runs its unit tests and a replay of the sample log first. Pushes to main, pull
+# requests and a manual run without a version build without publishing; a manual run with version=x.y.z
+# tags the commit it ran on as vx.y.z.
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:          # build + test only
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version (e.g. 1.0.0): tags this commit v<version> and publishes. Empty = build only."
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+
+env:
+  LLAMA_TAG: b11985     # must match LLAMA_TAG in Ban.Llama.pas
+  SMOKE_GGUF: https://huggingface.co/Qwen/Qwen3-0.6B-GGUF/resolve/main/Qwen3-0.6B-Q8_0.gguf
+
+jobs:
+  linux:
+    runs-on: ubuntu-22.04    # glibc 2.35: runs on most current distributions
+    steps:
+      - uses: actions/checkout@v4
+      - name: Version
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          if [[ -n "$INPUT_VERSION" ]]; then V="${INPUT_VERSION#v}"
+          elif [[ "$GITHUB_REF" == refs/tags/v* ]]; then V="${GITHUB_REF_NAME#v}"
+          else V="dev-${GITHUB_SHA::7}"; fi
+          echo "VERSION=$V" >> "$GITHUB_ENV"
+      - name: Toolchain
+        run: sudo apt-get update && sudo apt-get install -y fpc cmake
+      - name: llama.cpp (portable CPU build)
+        run: |
+          git clone --depth 1 --branch "$LLAMA_TAG" https://github.com/ggml-org/llama.cpp llama.cpp
+          cmake -S llama.cpp -B llama.cpp/build -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=ON \
+            -DLLAMA_CURL=OFF -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_EXAMPLES=OFF \
+            -DLLAMA_BUILD_SERVER=OFF -DLLAMA_BUILD_TOOLS=OFF \
+            -DCMAKE_BUILD_WITH_INSTALL_RPATH=ON '-DCMAKE_INSTALL_RPATH=$ORIGIN' \
+            -DGGML_NATIVE=OFF -DGGML_OPENMP=OFF
+          cmake --build llama.cpp/build -j"$(nproc)" --target llama
+      - name: Build and test
+        run: make test
+      - name: End to end against the mock decider
+        run: |
+          python3 tests/mock_jev.py 3000 &
+          sleep 1
+          ./build/jevban --test tests/sample_access.log --jev-url http://127.0.0.1:3000/v1/systemone | tee out.txt
+          grep -q "Ban 192.0.2.44" out.txt
+          ! grep -q "Ban 198.51.100.7" out.txt
+      - name: Package
+        run: |
+          OUT="jevban-$VERSION-linux-x64"
+          mkdir -p "dist/$OUT"
+          strip build/jevban
+          cp build/jevban jevban.ini jevban.service README.md LICENSE data/badpaths.txt "dist/$OUT/"
+          cp data/LICENSE.seclists "dist/$OUT/LICENSE.badpaths"
+          cp -a llama.cpp/build/bin/lib*.so* "dist/$OUT/"
+          cp llama.cpp/LICENSE "dist/$OUT/LICENSE.llama.cpp"
+          tar -C dist -czf "dist/$OUT.tar.gz" "$OUT"
+          "dist/$OUT/jevban" --version
+      - name: Smoke test the in-process model (packaged folder, run from elsewhere)
+        run: |
+          curl -fsSL -o /tmp/smoke.gguf "$SMOKE_GGUF"
+          mkdir -p /tmp/smoke && tar -C /tmp/smoke -xzf dist/jevban-*-linux-x64.tar.gz
+          cd /tmp
+          /tmp/smoke/jevban-*/jevban --test "$GITHUB_WORKSPACE/tests/sample_access.log" --model /tmp/smoke.gguf | tee out.txt
+          grep -q "decider local smoke.gguf" out.txt
+          grep -q "via local batch of" out.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux
+          path: dist/jevban-*-linux-x64.tar.gz
+
+  windows:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - name: Version
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          if [[ -n "$INPUT_VERSION" ]]; then V="${INPUT_VERSION#v}"
+          elif [[ "$GITHUB_REF" == refs/tags/v* ]]; then V="${GITHUB_REF_NAME#v}"
+          else V="dev-${GITHUB_SHA::7}"; fi
+          echo "VERSION=$V" >> "$GITHUB_ENV"
+      - name: Free Pascal (Lazarus ships FPC 3.2.2 for win64)
+        shell: pwsh
+        run: |
+          choco install lazarus -y --no-progress
+          $fpc = Get-ChildItem C:\lazarus\fpc -Recurse -Filter fpc.exe | Where-Object { $_.FullName -like '*x86_64-win64*' } | Select-Object -First 1
+          if (-not $fpc) { throw "fpc.exe not found under C:\lazarus\fpc" }
+          "FPC=$($fpc.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append
+          & $fpc.FullName -iV
+      - name: Build and test
+        run: |
+          mkdir -p build/units
+          "$FPC" -O2 -Sh -vewn -FUbuild/units -obuild/jevban.exe jevban.lpr
+          "$FPC" -O2 -Sh -vewn -Fu. -FUbuild/units -obuild/jevban_test.exe tests/jevban_test.lpr
+          cp tests/sample_access.log data/badpaths.txt build/
+          ./build/jevban_test.exe
+          ./build/jevban.exe --test tests/sample_access.log --mode rules | tee out.txt
+          grep -q "Ban 192.0.2.44" out.txt
+      - name: llama.cpp (portable CPU build)
+        run: |
+          git clone --depth 1 --branch "$LLAMA_TAG" https://github.com/ggml-org/llama.cpp llama.cpp
+          cmake -S llama.cpp -B llama.cpp/build -DBUILD_SHARED_LIBS=ON -DGGML_NATIVE=OFF \
+            -DLLAMA_CURL=OFF -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_EXAMPLES=OFF \
+            -DLLAMA_BUILD_SERVER=OFF -DLLAMA_BUILD_TOOLS=OFF -DGGML_OPENMP=OFF
+          cmake --build llama.cpp/build --config Release --target llama -j 4
+          ls llama.cpp/build/bin/Release
+      - name: Package
+        run: |
+          OUT="dist/jevban-$VERSION-windows-x64"
+          mkdir -p "$OUT"
+          cp build/jevban.exe README.md LICENSE data/badpaths.txt "$OUT/"
+          cp data/LICENSE.seclists "$OUT/LICENSE.badpaths"
+          cp llama.cpp/build/bin/Release/*.dll "$OUT/"
+          cp llama.cpp/LICENSE "$OUT/LICENSE.llama.cpp"
+          # the VC++ runtime, app-local (llama.cpp is built with the shared runtime, /MD)
+          for f in vcruntime140.dll vcruntime140_1.dll msvcp140.dll; do cp "/c/Windows/System32/$f" "$OUT/"; done
+          # Windows defaults: Apache Lounge's log path, the netsh action, state next to the exe
+          sed -e 's|^logpath = .*|logpath = C:\\Apache24\\logs\\access.log|' \
+              -e 's|^type = iptables|type = netsh|' \
+              -e 's|^statefile = .*|; statefile = (default: jevban-state.json next to jevban.exe)|' \
+              jevban.ini > "$OUT/jevban.ini"
+          curl -fsSL -o "$OUT/cacert.pem" https://curl.se/ca/cacert.pem
+          # OpenSSL 3 for https:// decider URLs: the runner image's, else Git for Windows'
+          for d in "/c/Program Files/OpenSSL/bin" "/c/Program Files/OpenSSL-Win64/bin" "/c/Program Files/Git/mingw64/bin"; do
+            if [ -f "$d/libssl-3-x64.dll" ]; then cp "$d/libssl-3-x64.dll" "$d/libcrypto-3-x64.dll" "$OUT/"; break; fi
+          done
+          [ -f "$OUT/libssl-3-x64.dll" ] || { echo "no OpenSSL 3 DLLs found"; exit 1; }
+          "$OUT/jevban.exe" --version
+          curl -fsSL -o /tmp/smoke.gguf "$SMOKE_GGUF"
+          (cd /tmp && "$GITHUB_WORKSPACE/$OUT/jevban.exe" --test "$GITHUB_WORKSPACE/tests/sample_access.log" \
+            --model /tmp/smoke.gguf | tee out.txt)
+          grep -q "via local batch of" /tmp/out.txt
+          cd dist && 7z a -tzip "jevban-$VERSION-windows-x64.zip" "jevban-$VERSION-windows-x64" > /dev/null
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: dist/jevban-*-windows-x64.zip
+
+  publish:
+    if: startsWith(github.ref, 'refs/tags/v') || inputs.version != ''
+    needs: [linux, windows]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          # a manual run creates the tag on the commit it built
+          tag_name: ${{ inputs.version != '' && format('v{0}', inputs.version) || github.ref_name }}
+          target_commitish: ${{ github.sha }}
+          prerelease: ${{ contains(inputs.version != '' && inputs.version || github.ref_name, '-') }}
+          generate_release_notes: true
