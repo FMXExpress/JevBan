@@ -226,15 +226,19 @@ url = http://127.0.0.1:3000/v1/systemone
 |---|---|---|
 | Leaked secrets and repositories | `/.env`, `/.git/config`, `/.aws/credentials`, `id_rsa` | 10 |
 | Path traversal, system files | `../`, `/etc/passwd`, `/proc/self/` | 10 |
-| Code execution | `${jndi:` (Log4Shell), shell injection, phpunit and ThinkPHP RCE, router exploits | 10 |
+| Code execution | `${jndi:` (Log4Shell), shell injection, PHP-CGI argument injection, `php://input`, phpunit and ThinkPHP RCE, router exploits | 10 |
+| A shell already uploaded | PHP run from an uploads folder (`/wp-content/uploads/2026/10/x7f3.php`) | 10 |
 | SQL injection | `union select`, `sleep(`, `information_schema` | 10 |
 | Scanner tools | sqlmap, nikto, nuclei, zgrab, masscan, wpscan, gobuster, ffuf… | 10 |
 | Text written for an AI judge | a user agent saying "ignore previous instructions", "do not block", "this client is legitimate" | 10 |
 | Admin tools and config files | phpMyAdmin, Adminer, Tomcat manager, `wp-config.php.bak`, `web.config` | 6 |
 | Web shells, phpinfo, XSS, proxy probes, TLS sent to HTTP | `/shell.php`, `/phpinfo.php`, `<script`, `CONNECT` | 6 |
+| Upload filter tricks | `avatar.php.jpg` | 6 |
 | Known-bad path, 4xx | any of 2,454 paths from [SecLists](https://github.com/danielmiessler/SecLists) `quickhits` | +6 |
 | Known-bad file that exists (2xx), or a near variant on a 4xx | `/phpinfo2.php` → `/phpinfo.php` | +3 |
 | Path scan | 8 different missing paths within a minute (plugin probes, files no list has) | +3 |
+| File probe | a 4xx on code, config, data or a backup by name (`/Admin.asp`, `/db.sql`, `/config.json`) | +3 |
+| File scan | the 3rd different file probe from one client within an hour: a scanner pacing itself between page views | +3 more |
 | Site-dependent | WordPress and VPN logins, `/cgi-bin/`, script user agents, backups, 4xx bursts | 3 |
 
 Weight 10 is never legitimate and bans without asking the model; 6 is almost always a probe;
@@ -306,14 +310,15 @@ Signatures and behaviour rules alone (no model), held-out test splits and LogarX
 
 | | Benign clients banned | Attackers banned | Attack requests that reached the server |
 |---|---|---|---|
-| WordPress test | 0 of 73 | 44 of 51 | 212 |
-| Static site test | 0 of 72 | 43 of 52 | 238 |
-| Web app test | 0 of 79 | 41 of 51 | 233 |
-| LogarX (real) | 0 of 789 | 124 of 126 | 564 |
+| WordPress test | 0 of 73 | 44 of 51 | 196 |
+| Static site test | 0 of 72 | 48 of 52 | 170 |
+| Web app test | 0 of 79 | 43 of 51 | 216 |
+| LogarX (real) | 0 of 789 | 126 of 126 | 536 |
 
 The attackers the rules still miss are the ones that look like ordinary use (password
 guessing, plugin probing, stealthy scanning between page views); those are the model's job.
-Adding Flash 9B on the same held-out test splits (4-core CPU):
+Adding Flash 9B on the same held-out test splits (4-core CPU, measured before the file-probe
+rules):
 
 | | Benign clients banned | Attackers banned, rules alone | Attackers banned, rules + Flash 9B |
 |---|---|---|---|
@@ -323,7 +328,18 @@ Adding Flash 9B on the same held-out test splits (4-core CPU):
 
 The model adds the password guessers on the WordPress and static sites and a few plugin and
 exploit probers, and bans no one the rules spared. Scanners hidden between ordinary page views
-(`stealth`, 3 per split) are still missed by both.
+(`stealth`, 3 per split) were missed by both; the file-probe rules now catch some of them.
+
+### What the model decides, and what it doesn't
+
+The work is split by how certain a request is. Weight-10 matches are hard rules: never
+legitimate, decided without the model. Requests that score below 3 never reach it. Everything
+in between (a WordPress login, a plugin path that 404s, a path scan, a file probe, a script
+user agent) is the model's call, judged per client with its recent requests and your `site`
+description. On the WordPress test split that was 137 model calls: 35 strikes and 292 passes,
+against 34 hard-rule decisions. Rules alone never strike these clients, so every password
+guesser the model banned (3 of 3 on WordPress) is one the rules let through, and every pass
+is a site-dependent request that a stricter rule would have had to ban or ignore blindly.
 
 ## Configuration
 

@@ -94,6 +94,8 @@ type
     LoggedIn: Boolean;       { a login POST was answered with a redirect: it signed in }
     ScanStart: Int64;        { distinct 404 paths in the scan window }
     ScanPaths: TStringList;
+    ProbeStart: Int64;       { distinct 4xx file probes in the probe window }
+    ProbePaths: TStringList;
     VerdictAt: Int64;        { 0 = no verdict yet }
     VerdictMal: Double;
     VerdictIntent: string;
@@ -263,6 +265,9 @@ begin
   ScanPaths := TStringList.Create;
   ScanPaths.Sorted := True;
   ScanPaths.Duplicates := dupIgnore;
+  ProbePaths := TStringList.Create;
+  ProbePaths.Sorted := True;
+  ProbePaths.Duplicates := dupIgnore;
   JudgedTags := TStringList.Create;
   JudgedTags.Sorted := True;
   JudgedTags.Duplicates := dupIgnore;
@@ -276,6 +281,7 @@ begin
   Pending.Free;
   JudgedTags.Free;
   ScanPaths.Free;
+  ProbePaths.Free;
   Recent.Free;
   inherited Destroy;
 end;
@@ -734,6 +740,35 @@ begin
       begin
         Inc(LScore, 3);
         LTags.Add('path-scan');
+      end;
+    end;
+    (* a missing file that is code, configuration, data or a backup: suspicious
+       alone (the decider sees it), a strike once a client has asked for several
+       within the hour. That is a scanner pacing itself between page views, which
+       the one-minute path-scan window and the known-bad list both miss *)
+    if (FCfg.ProbeFiles > 0) and (E.Status >= 400) and (E.Status < 500) then
+    begin
+      if FBad = nil then
+        LPath := NormalizePath(E.Decoded);   { else the known-bad check already did }
+      if IsFileProbe(LPath) then
+      begin
+        if LNow - C.ProbeStart > FCfg.ProbeWindow then
+        begin
+          C.ProbeStart := LNow;
+          C.ProbePaths.Clear;
+        end;
+        if C.ProbePaths.Count < 1000 then
+          C.ProbePaths.Add(LPath);
+        if LTags.IndexOf('known-bad-path') < 0 then
+        begin
+          Inc(LScore, 3);
+          LTags.Add('file-probe');
+        end;
+        if C.ProbePaths.Count >= FCfg.ProbeFiles then
+        begin
+          Inc(LScore, 3);
+          LTags.Add('file-scan');
+        end;
       end;
     end;
     if LScore >= FCfg.SuspiciousScore then

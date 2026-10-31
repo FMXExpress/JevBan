@@ -79,6 +79,12 @@ begin
     'think\\app|base64_decode\()');
   AddRule(6, sfUrl, 'webshell', '/(shell|cmd|c99|r57|wso|alfa|b374k|indoxploit|xleet|leaf|' +
     'mini|up|uploader|webshell|bypass|0x|404|wp-sx|ws)\.php');
+  (* PHP running from a folder that only ever holds what visitors uploaded: a
+     shell that is already on the box, under a random name no list knows *)
+  AddRule(10, sfUrl, 'php-in-uploads', '/(uploads?|avatars?|attachments?|tmp)/([^?]*/)?[^/?]*' +
+    '\.(php\d?|phtml|phar|pht)([/?]|$)');
+  { an image name with a PHP extension inside: an upload filter being tricked }
+  AddRule(6, sfUrl, 'double-extension', '\.(php\d?|phtml|phar|pht)\.(jpe?g|png|gif|webp|bmp|ico|txt)([/?]|$)');
   AddRule(10, sfUrl, 'device-exploit', '/(HNAP1|boaform|GponForm|setup\.cgi|tmUnblock\.cgi|apply\.cgi|' +
     'goform/|picsdesc\.xml|ctrlt/DeviceUpgrade|device\.rsp|login\.cgi\?cli|shell\?cd|cgi-bin/luci/;|' +
     'mgmt/tm/util/bash|hudson/script|cgi-bin/.*\.(sh|cgi)\?)');

@@ -326,6 +326,14 @@ begin
   Check(BoundedLevenshtein('kitten', 'sitting', 10) = 3, 'levenshtein');
   Check(BoundedLevenshtein('kitten', 'sitting', 1) = 2, 'levenshtein gives up past the bound');
   Check((FuzzAllowance(5) = 0) and (FuzzAllowance(12) = 1) and (FuzzAllowance(20) = 2), 'fuzz allowance');
+  Check(IsFileProbe('/admin.asp') and IsFileProbe('/old/db.sql') and IsFileProbe('/config.json'),
+    'file probe: code, data, config');
+  Check(IsFileProbe('/.npmrc') and IsFileProbe('/site/web.config.bak'), 'file probe: dotfile, backup suffix');
+  Check(not IsFileProbe('/about') and not IsFileProbe('/blog/post.html') and not IsFileProbe('/logo.png'),
+    'file probe: pages and assets are not');
+  Check(not IsFileProbe('/robots.txt') and not IsFileProbe('/.well-known/security.txt') and
+    not IsFileProbe('/manifest.json') and not IsFileProbe('/press-kit.zip') and not IsFileProbe('/v1.2'),
+    'file probe: well-known names, downloads, versions are not');
   B := TBadPaths.Create;
   try
     B.LoadFile(ExtractFilePath(ParamStr(0)) + 'badpaths.txt');
