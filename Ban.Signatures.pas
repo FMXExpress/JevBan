@@ -109,6 +109,11 @@ begin
     'l9explore|l9tcpid|zmeu|morfeus|jorgee|hydra|commix|xsser|wfuzz)');
   AddRule(3, sfAgent, 'script-agent', '^(python-requests|python-urllib|python-httpx|go-http-client|' +
     'curl/|wget/|libwww-perl|java/|okhttp|axios/|node-fetch|aiohttp|-$|$)');
+  { text written for an AI judge, in a user agent, referer or URL: no real client says this }
+  AddRule(10, sfAny, 'prompt-injection', '(ignore (all |any )?(the )?(previous|prior|above|earlier) ' +
+    '(instructions|rules|prompts?)|(do not|don''t|never) (block|ban|flag|report)|answer (with )?(yes|no|a|b)\b|' +
+    '\bsystem ?(prompt)? ?:|you are (an? )?(ai|assistant|language model|llm)|authori[sz]ed ' +
+    '(pen(etration)? ?test|security (audit|scan))|(this|the) (client|request|traffic) is (legitimate|benign|safe))');
 end;
 
 destructor TSignatureSet.Destroy;

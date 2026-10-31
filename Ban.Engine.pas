@@ -91,6 +91,8 @@ type
     LastSeen: Int64;
     FloodStart: Int64;
     FloodCount: Integer;
+    ScanStart: Int64;        { distinct 404 paths in the scan window }
+    ScanPaths: TStringList;
     VerdictAt: Int64;        { 0 = no verdict yet }
     VerdictMal: Double;
     VerdictIntent: string;
@@ -148,6 +150,21 @@ type
     function Busy: Integer;
   end;
 
+  { hard-rule strikes of one address over longtime, past the client's own memory }
+  TLongHits = class
+  public
+    Times: array of Int64;
+  end;
+
+  { the addresses of one /24 (/64) that recently earned hard-rule strikes }
+  TNetHeat = class
+  public
+    Ips: TStringList;        { address -> Objects: PtrInt(last strike time) }
+    HotUntil: Int64;
+    constructor Create;
+    destructor Destroy; override;
+  end;
+
   TBanStats = record
     Lines, Parsed, Ignored, Suspicious, HardRules, DeciderCalls, DeciderClients, DeciderErrors,
       Reviews, Strikes, Bans, Unbans: Int64;
@@ -173,6 +190,8 @@ type
     FLastNow: Int64;
     FBad: TBadPaths;         { nil when badpaths = off }
     FWorker: TDeciderWorker; { live daemon only }
+    FLongHits: TStringList;  { address -> TLongHits }
+    FNets: TStringList;      { subnet -> TNetHeat }
     { --eval: strike decisions per labelled request, rules alone and the whole pipeline }
     FEvalRules, FEvalLive: TConfusion;
     FEvalAfterBan: array[CTruthBenign..CTruthAttack] of Int64;
@@ -198,6 +217,10 @@ type
     procedure CollectResults;
     procedure AddStrike(C: TClient; ANow: Int64; AInstant: Boolean; const AReason: string);
     procedure BanClient(C: TClient; const AReason: string);
+    procedure BanAddress(const AIp: TIpAddr; const AReason: string);
+    { a probe (score >= rules_min_score), whatever the decider makes of it: counts
+      toward the slow-scanner and subnet rules }
+    procedure ProbeHit(C: TClient; ANow: Int64; const AReason: string);
     procedure Purge(ANow: Int64);
     procedure EvictOldest(ACount: Integer);
     procedure LoadState;
@@ -235,6 +258,9 @@ constructor TClient.Create;
 begin
   inherited Create;
   Recent := TStringList.Create;
+  ScanPaths := TStringList.Create;
+  ScanPaths.Sorted := True;
+  ScanPaths.Duplicates := dupIgnore;
   JudgedTags := TStringList.Create;
   JudgedTags.Sorted := True;
   JudgedTags.Duplicates := dupIgnore;
@@ -247,7 +273,23 @@ begin
   PendingTags.Free;
   Pending.Free;
   JudgedTags.Free;
+  ScanPaths.Free;
   Recent.Free;
+  inherited Destroy;
+end;
+
+{ TNetHeat }
+
+constructor TNetHeat.Create;
+begin
+  inherited Create;
+  Ips := TStringList.Create;
+  Ips.Sorted := True;
+end;
+
+destructor TNetHeat.Destroy;
+begin
+  Ips.Free;
   inherited Destroy;
 end;
 
@@ -392,6 +434,12 @@ begin
   FEvalClients := TStringList.Create;
   FEvalClients.Sorted := True;
   FEvalClients.OwnsObjects := True;
+  FLongHits := TStringList.Create;
+  FLongHits.Sorted := True;
+  FLongHits.OwnsObjects := True;
+  FNets := TStringList.Create;
+  FNets.Sorted := True;
+  FNets.OwnsObjects := True;
   FEvalCats := TStringList.Create;
   FEvalCats.Sorted := True;
   FEvalCats.OwnsObjects := True;
@@ -430,6 +478,8 @@ begin
   FLog.Free;
   FEvalClients.Free;
   FEvalCats.Free;
+  FNets.Free;
+  FLongHits.Free;
   FBad.Free;
   FQueue.Free;
   FBans.Free;
@@ -650,10 +700,30 @@ begin
         LTags.Add('4xx-flood');
       end;
     end;
+    { many different missing paths in a minute: someone walking a word list, whatever
+      the paths are (WordPress plugins, files no list has). Weak on its own (a link
+      checker can do it too): it brings the client to the decider with that context }
+    if (FCfg.Scan404 > 0) and (E.Status = 404) then
+    begin
+      if LNow - C.ScanStart > FCfg.ScanWindow then
+      begin
+        C.ScanStart := LNow;
+        C.ScanPaths.Clear;
+      end;
+      if C.ScanPaths.Count < 1000 then
+        C.ScanPaths.Add(NormalizePath(E.Decoded));
+      if C.ScanPaths.Count >= FCfg.Scan404 then
+      begin
+        Inc(LScore, 3);
+        LTags.Add('path-scan');
+      end;
+    end;
     if LScore >= FCfg.SuspiciousScore then
     begin
       Inc(Stats.Suspicious);
       Judge(C, LSummary, LModelLine, LTags.CommaText, LScore, ATruth, ACategory, LNow);
+      if (LScore >= FCfg.RulesMinScore) and not IsBanned(C.IpText) then
+        ProbeHit(C, LNow, Format('%s, score %d', [LTags.CommaText, LScore]));
     end
     else
       { not flagged: neither rules nor model strike }
@@ -1312,21 +1382,93 @@ begin
     BanClient(C, AReason);
 end;
 
+procedure TBanEngine.ProbeHit(C: TClient; ANow: Int64; const AReason: string);
+var
+  I, J: Integer;
+  LLong: TLongHits;
+  LNet: TNetHeat;
+  LKey: string;
+  LIp: TIpAddr;
+begin
+  (* a slow scanner: one probe every 15-40 minutes never reaches maxretry within
+     findtime, and its client state is forgotten in between; probes are
+     remembered per address for longtime *)
+  if FCfg.LongRetry > 0 then
+  begin
+    I := FLongHits.IndexOf(C.IpText);
+    if I < 0 then
+      I := FLongHits.AddObject(C.IpText, TLongHits.Create);
+    LLong := TLongHits(FLongHits.Objects[I]);
+    J := 0;
+    for I := 0 to High(LLong.Times) do
+      if ANow - LLong.Times[I] < FCfg.LongTime then
+      begin
+        LLong.Times[J] := LLong.Times[I];
+        Inc(J);
+      end;
+    SetLength(LLong.Times, J + 1);
+    LLong.Times[J] := ANow;
+    if Length(LLong.Times) >= FCfg.LongRetry then
+    begin
+      BanClient(C, Format('%s; %d probes in %ds', [AReason, Length(LLong.Times), FCfg.LongTime]));
+      Exit;
+    end;
+  end;
+  (* a scan spread over a subnet: each address probes twice and none reaches
+     maxretry. Once subnet_retry addresses of one /24 (/64) have probed within
+     findtime, the subnet is hot for findtime: those addresses, and any of its
+     addresses that probes, are banned. Only addresses that probed are banned,
+     never the subnet: it may be a NAT or a carrier *)
+  if FCfg.SubnetRetry > 0 then
+  begin
+    LKey := SubnetKey(C.Ip);
+    I := FNets.IndexOf(LKey);
+    if I < 0 then
+      I := FNets.AddObject(LKey, TNetHeat.Create);
+    LNet := TNetHeat(FNets.Objects[I]);
+    for J := LNet.Ips.Count - 1 downto 0 do
+      if ANow - PtrInt(LNet.Ips.Objects[J]) >= FCfg.FindTime then
+        LNet.Ips.Delete(J);
+    J := LNet.Ips.IndexOf(C.IpText);
+    if J < 0 then
+      LNet.Ips.AddObject(C.IpText, TObject(PtrInt(ANow)))
+    else
+      LNet.Ips.Objects[J] := TObject(PtrInt(ANow));
+    if LNet.HotUntil > ANow then
+      BanClient(C, Format('%s; subnet %s is scanning', [AReason, LKey]))
+    else if LNet.Ips.Count >= FCfg.SubnetRetry then
+    begin
+      LNet.HotUntil := ANow + FCfg.FindTime;
+      for J := 0 to LNet.Ips.Count - 1 do
+        if ParseIp(LNet.Ips[J], LIp) and not IsBanned(LNet.Ips[J]) then
+          BanAddress(LIp, Format('%s; %d addresses of %s probing', [AReason, LNet.Ips.Count, LKey]));
+    end;
+  end;
+end;
+
 procedure TBanEngine.BanClient(C: TClient; const AReason: string);
+begin
+  BanAddress(C.Ip, AReason);
+  SetLength(C.Strikes, 0);
+end;
+
+procedure TBanEngine.BanAddress(const AIp: TIpAddr; const AReason: string);
 var
   I: Integer;
   B: TBanRecord;
   LSecs, LNow: Int64;
+  LText: string;
 begin
-  I := FBans.IndexOf(C.IpText);
+  LText := IpToStr(AIp);
+  I := FBans.IndexOf(LText);
   if I >= 0 then
     B := TBanRecord(FBans.Objects[I])
   else
   begin
     B := TBanRecord.Create;
-    B.Ip := C.Ip;
-    B.IpText := C.IpText;
-    FBans.AddObject(C.IpText, B);
+    B.Ip := AIp;
+    B.IpText := LText;
+    FBans.AddObject(LText, B);
   end;
   if B.Active then
     Exit;
@@ -1339,7 +1481,6 @@ begin
   B.Since := LNow;
   B.Expires := LNow + LSecs;
   B.Reason := AReason;
-  SetLength(C.Strikes, 0);
   Inc(Stats.Bans);
   I := FEvalClients.IndexOf(B.IpText);
   if (I >= 0) and (TEvalClient(FEvalClients.Objects[I]).BannedAt = 0) then
@@ -1360,6 +1501,8 @@ var
   C: TClient;
   B: TBanRecord;
   LIdle: Int64;
+  J: Integer;
+  LFresh: Boolean;
 begin
   LIdle := Max(FCfg.FindTime, FCfg.CacheSecs);
   for I := FClients.Count - 1 downto 0 do
@@ -1368,6 +1511,19 @@ begin
     if (ANow - C.LastSeen > LIdle) and not C.Queued and not C.InFlight then
       FClients.Delete(I);
   end;
+  for I := FLongHits.Count - 1 downto 0 do
+    with TLongHits(FLongHits.Objects[I]) do
+      if (Length(Times) = 0) or (ANow - Times[High(Times)] >= FCfg.LongTime) then
+        FLongHits.Delete(I);
+  for I := FNets.Count - 1 downto 0 do
+    with TNetHeat(FNets.Objects[I]) do
+    begin
+      LFresh := False;
+      for J := 0 to Ips.Count - 1 do
+        LFresh := LFresh or (ANow - PtrInt(Ips.Objects[J]) < FCfg.FindTime);
+      if (HotUntil <= ANow) and not LFresh then
+        FNets.Delete(I);
+    end;
   { an expired ban is remembered for bantime.increment until maxtime passes }
   for I := FBans.Count - 1 downto 0 do
   begin

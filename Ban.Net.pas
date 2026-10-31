@@ -34,6 +34,8 @@ function CidrMatch(const C: TCidr; const A: TIpAddr): Boolean;
 { space or comma separated; raises EConvertError on a bad entry }
 function ParseCidrList(const S: string): TCidrList;
 function InCidrList(const L: TCidrList; const A: TIpAddr): Boolean;
+{ the address's /24 (IPv4) or /64 (IPv6), as text: '192.0.2.0/24', '2001:db8:0:1::/64' }
+function SubnetKey(const A: TIpAddr): string;
 
 implementation
 
@@ -311,6 +313,25 @@ begin
     end;
   finally
     LItems.Free;
+  end;
+end;
+
+function SubnetKey(const A: TIpAddr): string;
+var
+  LNet: TIpAddr;
+  I: Integer;
+begin
+  LNet := A;
+  if A.IsV4 then
+  begin
+    LNet.Bytes[15] := 0;
+    Result := IpToStr(LNet) + '/24';
+  end
+  else
+  begin
+    for I := 8 to 15 do
+      LNet.Bytes[I] := 0;
+    Result := IpToStr(LNet) + '/64';
   end;
 end;
 

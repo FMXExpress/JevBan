@@ -30,9 +30,15 @@ type
     BanTime: Int64;
     BanIncrement: Boolean;    { each repeat ban lasts twice as long ... }
     BanMax: Int64;            { ... up to this }
+    LongRetry: Integer;       { hard-rule strikes within LongTime that ban a slow scanner; 0 = off }
+    LongTime: Int64;
+    SubnetRetry: Integer;     { addresses of one /24 (/64) with hard-rule strikes within findtime
+                                that make the subnet hot; 0 = off }
     ContextLines: Integer;    { recent requests per client kept for the model }
     MaxClients: Integer;
     Flood4xx: Integer;        { this many 4xx in findtime is suspicious too; 0 = off }
+    Scan404: Integer;         { this many distinct 404 paths within ScanWindow: a path scan; 0 = off }
+    ScanWindow: Integer;
     SignatureFile: string;
     BuiltinSignatures: Boolean;
     SuspiciousScore: Integer; { prefilter score that sends a request to the decider }
@@ -193,9 +199,14 @@ begin
   BanTime := 3600;
   BanIncrement := True;
   BanMax := 7 * 86400;
+  LongRetry := 5;
+  LongTime := 86400;
+  SubnetRetry := 3;
   ContextLines := 6;
   MaxClients := 20000;
   Flood4xx := 40;
+  Scan404 := 8;
+  ScanWindow := 60;
   BuiltinSignatures := True;
   SuspiciousScore := 3;
   Nice := 10;
@@ -385,9 +396,14 @@ begin
       BanTime := LIni.ReadInt64('jevban', 'bantime', BanTime);
       BanIncrement := LIni.ReadBool('jevban', 'bantime.increment', BanIncrement);
       BanMax := LIni.ReadInt64('jevban', 'bantime.maxtime', BanMax);
+      LongRetry := LIni.ReadInteger('jevban', 'longretry', LongRetry);
+      LongTime := LIni.ReadInt64('jevban', 'longtime', LongTime);
+      SubnetRetry := LIni.ReadInteger('jevban', 'subnet_retry', SubnetRetry);
       ContextLines := LIni.ReadInteger('jevban', 'context_lines', ContextLines);
       MaxClients := LIni.ReadInteger('jevban', 'max_clients', MaxClients);
       Flood4xx := LIni.ReadInteger('jevban', 'flood_4xx', Flood4xx);
+      Scan404 := LIni.ReadInteger('jevban', 'scan_404', Scan404);
+      ScanWindow := LIni.ReadInteger('jevban', 'scan_window', ScanWindow);
       SignatureFile := LIni.ReadString('jevban', 'signatures', SignatureFile);
       BuiltinSignatures := LIni.ReadBool('jevban', 'builtin_signatures', BuiltinSignatures);
       SuspiciousScore := LIni.ReadInteger('jevban', 'suspicious_score', SuspiciousScore);
