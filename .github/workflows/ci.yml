@@ -1,0 +1,22 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  linux:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Toolchain
+        run: sudo apt-get update && sudo apt-get install -y fpc
+      - name: Build and test
+        run: make test
+      - name: End to end against the mock decider
+        run: |
+          python3 tests/mock_jev.py 3000 &
+          sleep 1
+          ./build/jevban --test tests/sample_access.log | tee out.txt
+          grep -q "Ban 192.0.2.44" out.txt
+          ! grep -q "Ban 198.51.100.7" out.txt
