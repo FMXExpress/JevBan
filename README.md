@@ -1,315 +1,421 @@
-# jevban: fail2ban for web attackers, judged by a Jev-style decision AI
+# jevban
 
-**One binary, nothing else to install.** jevban runs [OpenJev](https://huggingface.co/openjev/OpenJev-Flash-9B)
-inside itself on llama.cpp; the first start downloads the model (Flash 9B, 5.6 GB). Or point it at
-the hosted Jev API, or at your own OpenJev server.
+**fail2ban for web attackers, with an AI judge.** jevban follows your web server's access logs,
+spots clients probing for security holes, asks a decision model whether each one is really
+attacking, and bans the ones that are in your firewall.
 
-A Free Pascal command-line daemon. It follows Apache access logs, spots clients that are
-hunting for security holes, and bans them in the firewall, the way fail2ban does. The
-difference from a fail2ban filter: a regex is only the **prefilter**. A **decision model**
-(OpenJev, or the hosted Jev API) decides whether a client is attacking. It sees the client's
-recent requests and a plain-words description of your site.
+[![build](https://github.com/FMXExpress/JevBan/actions/workflows/release.yml/badge.svg)](https://github.com/FMXExpress/JevBan/actions/workflows/release.yml)
+![platforms](https://img.shields.io/badge/platforms-Linux%20%7C%20Windows-informational)
+![language](https://img.shields.io/badge/Free%20Pascal-3.2.2-blue)
+[![license](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
 ```
-access.log ──tail -F──▶ parse ──▶ signatures (cheap) ──suspicious──▶ POST /v1/systemone
-                                                                         │ P(malicious), intent
-                     firewall ◀── ban ◀── maxretry strikes in findtime ◀──┘
+$ jevban --eval tests/labeled_access.log        # excerpt, timestamps and user agents trimmed
+203.0.113.66 strike 1/3 score=16 [env-file,known-bad-path] via hard rule: "GET /.env HTTP/1.1" 404
+192.0.2.77 BAN score=3 [near-known-bad] p=0.98 via local batch of 1: "GET /phpinfo2.php HTTP/1.1" 404
+192.0.2.88 strike 1/3 score=3 [wordpress] p=0.92 via local batch of 1: "GET /wp-content/plugins/revslider/..." 404
+192.0.2.99 strike 1/3 score=3 [wordpress] p=0.94 via local batch of 1: "POST /wp-login.php HTTP/1.1" 200
+192.0.2.150 pass score=3 [wordpress] p=0.38 via local (cached): "POST /wp-login.php HTTP/1.1" 200
 ```
 
-Why a model: `GET /wp-login.php` is a probe on a static site and a normal login on a WordPress
-site. You write that in `site =` and the model weighs it. A regex can't.
+Regex filters can't tell the last two apart: both are `POST /wp-login.php`, one from a password
+guesser and one from the site's owner. jevban's model sees each client's recent requests and a
+plain-words description of your site, and decides.
 
-## Download
+---
 
-Linux x64 and Windows x64 builds are on the [Releases page](https://github.com/FMXExpress/jevban/releases).
-Both include the llama.cpp libraries (CPU, AVX2) for the local model. The Windows zip also has
-the OpenSSL DLLs and `cacert.pem` for `https://`, and its `jevban.ini` uses the `netsh` action.
+- [Why jevban](#why-jevban)
+- [How it works](#how-it-works)
+- [Quick start](#quick-start)
+- [Deciders: local model, hosted API, or rules](#deciders)
+- [What it catches](#what-it-catches)
+- [Rolling it out safely](#rolling-it-out-safely)
+- [Configuration](#configuration)
+- [Command line](#command-line)
+- [Firewall actions](#firewall-actions)
+- [Requirements and performance](#requirements-and-performance)
+- [Security notes](#security-notes)
+- [Building from source](#building-from-source)
+- [License and credits](#license-and-credits)
 
-## Build and try it
+## Why jevban
+
+Every public web server is crawled around the clock by bots that try `/.env`, `/.git/config`,
+`/wp-config.php.bak`, `/phpmyadmin/` and hundreds of other paths, looking for a leaked secret
+or an unpatched app. A typical bot tries 20–50 URLs before moving on. fail2ban can stop them
+with regex filters, but regexes can't weigh context: `/wp-login.php` is an attack on a static
+site and an everyday login on a WordPress blog.
+
+jevban keeps the fast, predictable parts of fail2ban and adds judgement where it is needed:
+
+- **Triage, not a black box.** Cheap checks decide the clear cases instantly. Only the
+  ambiguous ones go to the model, and the model can never overrule a hard rule.
+- **Runs the model itself.** By default jevban runs [OpenJev](https://huggingface.co/openjev/OpenJev-Flash-9B),
+  an open decision model, in-process on llama.cpp. The first start downloads it; there is
+  nothing else to install, no Python, and no data leaves the server.
+- **Or uses a hosted API.** One line selects the [Jev API](https://docs.typesafe.ai/introduction)
+  or a compatible provider (Perplexity, Liquid, DigitalOcean, Abacus, Vercel) at a few cents per
+  thousand decisions.
+- **Catches variants, not just exact strings.** Requests are decoded before matching, and a
+  list of 2,454 known-bad paths is matched exactly and within 1–2 edits, so `/%2e%65%6e%76`,
+  `/phpinfo2.php` and `/wp-config.php.save1` are caught without a rule for each.
+- **Measurable.** `--eval` replays a labelled log and reports precision and recall for the
+  rules alone and for the full pipeline; `--shadow` runs the model on live traffic without
+  letting it ban.
+- **fail2ban semantics.** `findtime`, `maxretry`, `bantime`, increasing bans for repeat
+  offenders, `ignoreip`, bans that survive restarts, and actions for iptables, nftables, ufw,
+  firewalld, fail2ban itself, the Windows firewall, or your own command.
+- **One small binary** for Linux and Windows, written in Free Pascal.
+
+## How it works
+
+```
+access.log ─▶ decode + normalize ─▶ score: signatures + known-bad paths
+                                         │
+            ┌────────────────────────────┼─────────────────────────────┐
+         score 0                score ≥ 10 (hard rule)            in between
+      nothing to judge        strike now, no model call      queued for the model
+                                         │                            │
+                                         │              one batched request every few seconds
+                                         │                p ≥ 0.97 ban · p ≥ 0.80 strike
+                                         │                p ≥ 0.50 REVIEW (logged, no strike)
+                                         ▼                            │
+                           3 strikes within 10 minutes  ◀─────────────┘
+                                         │
+                                         ▼
+                         ban in the firewall for 1 hour (doubling for repeat offenders)
+```
+
+1. **Decode and normalize.** Apache's `\xhh` escapes and URL encoding (twice, to undo double
+   encoding) are reversed, and the path is lowercased with `//` and `/./` collapsed.
+2. **Score.** About 30 weighted signatures (secrets, traversal, injection, scanner tools…) and
+   the known-bad path list add up to a score. Most traffic scores 0 and is only kept as
+   context.
+3. **Hard rules.** A score of 10 or more (`/.env`, `../`, `${jndi:`, `union select`, sqlmap…)
+   is a strike immediately, so an obvious scanner is banned by its third probe, while it is
+   still probing.
+4. **The model judges the middle ground.** Flagged clients are queued and sent in one batch
+   every 5 seconds (or 1,000 lines, or 8 clients). The model sees the client's flagged
+   requests, its other recent requests, and your `site =` description, and returns the
+   probability that the client is attacking. A verdict is reused for 60 seconds, so a scanner
+   firing 200 probes costs one question.
+5. **Ban.** `maxretry` strikes within `findtime` ban the client in the firewall for
+   `bantime`. Bans are saved and restored across restarts, and lifted when they expire.
+
+## Quick start
+
+### Linux
+
+Download `jevban-<version>-linux-x64.tar.gz` from the [Releases page](https://github.com/FMXExpress/JevBan/releases).
+It needs glibc 2.35 or newer (Ubuntu 22.04, Debian 12, Fedora 36 and later) and a CPU with AVX2.
 
 ```bash
-make                   # -> build/jevban   (FPC 3.2.2; OpenSSL only for https://)
-make llama             # llama.cpp libraries next to it, for mode = local (git, cmake, a C++ compiler)
-make test              # unit tests + a replay of tests/sample_access.log
+sudo mkdir -p /opt/jevban && sudo tar -C /opt/jevban --strip-components=1 -xzf jevban-*-linux-x64.tar.gz
+sudo install -D -m 644 /opt/jevban/jevban.ini /etc/jevban/jevban.ini
 ```
+
+Edit `/etc/jevban/jevban.ini`: set `logpath` to your access logs and describe your site in
+`site =` (see [Configuration](#configuration)). Then see what it would do, without banning
+anything:
 
 ```bash
-./build/jevban --test /var/log/apache2/access.log --mode rules       # what would be banned, bans nothing
-./build/jevban --test /var/log/apache2/access.log -u http://127.0.0.1:3000/v1/systemone   # asking a server
-./build/jevban --test /var/log/apache2/access.log --model flash-9b    # OpenJev in-process (downloads 5.6 GB once)
-python3 tests/mock_jev.py 3000 &                              # a fake /v1/systemone server, for --jev-url
+sudo /opt/jevban/jevban --test /var/log/apache2/access.log
 ```
 
-A run over `tests/sample_access.log` (`--mode rules`):
-
-```
-203.0.113.66 strike 1/3 score=10 [env-file] via rules: "GET /.env HTTP/1.1" 404 ...
-203.0.113.66 strike 2/3 score=10 [vcs-dir] via rules: "GET /.git/config HTTP/1.1" 404 ...
-203.0.113.66 strike 3/3 score=9 [config-file,backup-file] via rules: "GET /wp-config.php.bak HTTP/1.1" 404 ...
-Ban 203.0.113.66 for 3600s (ban #1): config-file,backup-file, score 9
-192.0.2.44 BAN score=20 [sqli,scanner-agent] via rules: "GET /?id=1%20UNION%20SELECT..." ua="sqlmap/1.8..."
-198.51.100.7 pass score=3 [wordpress] via rules: "GET /wp-login.php HTTP/1.1" 200 ...
-15 lines, 15 parsed, 1 ignored, 9 suspicious, 0 decider calls (0 failed), 8 strikes, 2 bans, 0 unbans
-```
-
-## Run it for real
+The first run downloads the model (5.6 GB, once) into `/var/lib/jevban/models`. When you're
+happy with the decisions, run it as a service:
 
 ```bash
-sudo install -m 755 build/jevban /usr/local/bin/
-sudo install -D -m 644 jevban.ini /etc/jevban/jevban.ini     # edit logpath, site, action
-sudo jevban --dry-run                                                # watch the firewall commands it would run
-sudo install -m 644 jevban.service /etc/systemd/system/ && sudo systemctl enable --now jevban
-sudo jevban --list                                                   # active bans
+sudo /opt/jevban/jevban --dry-run        # live, but only log the firewall commands
+sudo install -m 644 /opt/jevban/jevban.service /etc/systemd/system/
+sudo systemctl enable --now jevban
+sudo /opt/jevban/jevban --list           # active bans
 ```
 
-It has to run as root (or with `CAP_NET_ADMIN`) to change the firewall.
+### Windows
 
-## How it scans, and how often it calls the model
+Download `jevban-<version>-windows-x64.zip` from the [Releases page](https://github.com/FMXExpress/JevBan/releases)
+and unzip it. Its `jevban.ini` is set up for Apache Lounge (`C:\Apache24\logs\access.log`) and
+the Windows firewall (`netsh`). From an elevated (Administrator) prompt:
 
-Cheap checks first; the model only judges what they can't settle, and it never overrules them:
-
-```
-decode + normalize (\xhh, %hh twice, case, // and /./)
-  → signatures (~30 weighted regexes) + known-bad paths (exact, and within 1-2 edits on a 4xx)
-      ├─ score 0                     → nothing to judge (kept as context)
-      ├─ score ≥ override_score (10) → hard rule: a strike now, the model is not asked
-      └─ in between                  → the model, in batches
-            p ≥ instant_threshold (0.97) → ban    p ≥ threshold (0.80) → strike
-            p ≥ review_threshold (0.5)   → REVIEW in the log, no strike
-  → maxretry strikes within findtime → ban
+```bat
+jevban.exe --test C:\Apache24\logs\access.log
+jevban.exe --dry-run
+jevban.exe
 ```
 
-1. **Every line** is decoded, parsed and scored. Most traffic scores 0 and stops here; the
-   line is still kept as context (the last `context_lines` requests of each client).
-2. **Known-bad paths** (`badpaths.txt`, 2,454 paths scanners probe for, from SecLists'
-   `quickhits`): a 4xx on one is a probe (+6); a 2xx means the path exists on your site, which
-   the model weighs (+3); a 4xx within 1 edit (paths of 8–15 characters) or 2 edits (16+) of
-   one is a variant (+3): `/phpinfo2.php`, `/adminer2.php`, `/wp-config.php.save1`. Encodings
-   are undone before any of this, so `/%2e%65%6e%76` is `/.env`.
-3. **Hard rules** (score ≥ `override_score`, the weight-10 signatures: `/.env`, `../`,
-   `${jndi:`, `union select`, sqlmap…) are strikes at once, without a model call. An obvious
-   scanner trying 30 URLs is banned at its third probe, while it is still probing.
-4. **The middle ground** goes to the model: a fresh verdict for the client (younger than
-   `cache_secs`) is reused; otherwise the client is queued, and the queue is flushed as one
-   request when any of these comes first: the oldest client has waited `batch_interval`
-   seconds (default 5), `batch_lines` log lines went by (1000), `batch_clients` clients are
-   queued (8). That one request carries every queued client with one yes/no question each.
-5. **REVIEW**: a probability between `review_threshold` and `threshold` is logged as `REVIEW`,
-   with no strike, for you to audit.
+The model is kept in `models\` next to `jevban.exe`. jevban runs as a console program; to start
+it at boot, use Task Scheduler with "run with highest privileges".
 
-A scanner firing 200 probes in 10 seconds costs at most 2 questions, not 200 calls.
-`max_per_minute` caps the requests; past it, the signatures decide.
+### Without the local model
 
-### Trying the model before it bans: `--eval` and shadow mode
+To try jevban without the 5.6 GB download, use the signatures alone, or a hosted API:
 
 ```bash
-jevban --eval tests/labeled_access.log            # labelled replay: rules vs the live pipeline
-jevban --shadow                                   # live: the model is asked and logged, the rules ban
+jevban --test access.log --mode rules
+TYPESAFE_API_KEY=... jevban --test access.log --provider typesafe
 ```
 
-`--eval` takes a log whose lines are `attack<TAB>log line` or `benign<TAB>log line` and prints,
-per request, the strike decisions of the signatures alone and of the live pipeline (TP, FP,
-FN, TN, precision, recall), the requests stopped by bans, and the attackers and benign clients
-banned. Label a day of your own log to see what the model adds before you trust it.
-`tests/labeled_access.log` is a synthetic WordPress site: scanners (obvious, variant-only,
-plugin probes), a password guesser, one-shot exploits, and benign crawlers, visitors with
-common 404s, an uptime monitor using curl, the owner logging in.
+<a id="deciders"></a>
+## Deciders: local model, hosted API, or rules
 
-With `shadow = 1`, the live daemon asks the model and logs every verdict next to the rules'
-decision (`(shadow: model says strike)`), but only the rules ban; run it for a while and
-compare.
-
-## Deciders
-
-| `mode` | What answers | Setup |
+| `mode` | What decides | Needs |
 |---|---|---|
-| `local` (default) | OpenJev in-process on llama.cpp | none: the model downloads on first start |
-| `jev` | a hosted decision API (`provider =`, below), or any `/v1/systemone` server (`url =`), e.g. OpenJev's helper | an API key, or the server |
-| `rules` | the signatures alone | none |
+| `local` (default) | OpenJev in-process on llama.cpp | ~7 GB of RAM; the model downloads on first start |
+| `jev` | A hosted decision API (`provider =`) or any Jev-compatible server (`url =`) | An API key, or your server |
+| `rules` | The signatures alone | Nothing |
 
-### Hosted providers (`provider` / `--provider`)
+If the model can't be loaded or the API fails, jevban logs why and the signatures decide, so
+protection never stops.
 
-```bash
-TYPESAFE_API_KEY=... jevban --provider typesafe
-```
+### Local models
 
-`provider =` sets `mode = jev`, the URL and the model, and takes the key from `api_key =`, the
-provider's own variable, or `JEV_API_KEY`. The endpoints and model ids come from each provider's
-documentation (October 2026). All take the Jev request body with `Authorization: Bearer`. Each
-one answered jevban's request with 401 "invalid key" to a dummy key; none has been tried with a
-real key yet.
-
-| `provider` | Endpoint | Model | Key variable | Input $/1M tokens |
-|---|---|---|---|---|
-| `typesafe` | `https://api.typesafe.ai/v1/systemone` | `jev-latest` (Jev 1.14) | `TYPESAFE_API_KEY` | 0.042 |
-| `perplexity` | `https://api.perplexity.ai/v1/decisions` | `pplx-decider-latest` | `PERPLEXITY_API_KEY` | 0.02 |
-| `perplexity-flash` | same | `pplx-decider-flash-latest` | `PERPLEXITY_API_KEY` | 0.01 |
-| `liquid` | `https://api.liquid.ai/decisions/v1/systemone` | `d1.1` | `LIQUID_API_KEY` | see liquid.ai/pricing |
-| `digitalocean` | `https://inference.do-ai.run/v1/systemone` | `typesafe-jev-1.13.0` | `MODEL_ACCESS_KEY` | see DigitalOcean |
-| `abacus` | `https://routellm.abacus.ai/v1/systemone` | `jev-latest` | `ABACUS_API_KEY` | 0.042 |
-| `vercel` | `https://ai-gateway.vercel.sh/typesafe/v1/systemone` | `typesafe-ai/jev` | `AI_GATEWAY_API_KEY` | see Vercel |
-
-Output is free with all of them. A flagged client is roughly 500–800 input tokens, so 1,000
-decisions cost a few cents. Abacus allows 10 questions per request and 20 requests a minute on
-self-serve plans; the preset caps `batch_clients` and `max_per_minute` to fit. `url =` or
-`model =` set alongside `provider =` override the preset's. A refused or failed request (401,
-429, 529, a timeout) makes the signatures decide for that batch.
-
-Not presets: Cloudflare's Clef runs at an account-specific Workers AI path with an undocumented
-response wrapper, and OpenRouter has no decision endpoint.
-
-### Local models (`local_model` / `--model`)
-
-| Name | File | Size | Accuracy (model card) |
+| `local_model` | Size | RAM | Accuracy, model card |
 |---|---|---|---|
-| `flash-9b` (default) | OpenJev-Flash-9B-Q4_K_M.gguf | 5.6 GB | 79.3% on the card's 1,789-question check (16-bit: 80.0%) |
-| `flash-9b-q5`, `-q6` | Q5_K_M, Q6_K | 6.5, 7.4 GB | |
-| `flash-9b-q8` | Q8_0 | 9.5 GB | 79.7% on the same check |
-| `27b` | OpenJev-Q4_K_M.gguf | 16.5 GB | 82.8% on its check (16-bit: 83.2%) |
-| `27b-q5`, `-q6`, `-q8` | Q5_K_M, Q6_K, Q8_0 | 19.2, 22.1, 28.6 GB | Q8_0: 82.6% |
+| `flash-9b` (default) | 5.6 GB | ~7 GB | 79.3% (16-bit: 80.0%) |
+| `flash-9b-q5`, `flash-9b-q6` | 6.5, 7.4 GB | ~8–9 GB | |
+| `flash-9b-q8` | 9.5 GB | ~11 GB | 79.7% |
+| `27b` | 16.5 GB | ~18 GB | 82.8% (16-bit: 83.2%) |
+| `27b-q5`, `27b-q6`, `27b-q8` | 19.2, 22.1, 28.6 GB | ~21–30 GB | Q8: 82.6% |
 
-Or a path to any `.gguf`. On the 10,000-question benchmark of the model cards the 27B scores
-84.1% and Flash 9B 79.4% (vLLM, 16-bit).
+You can also give the path to any `.gguf` file. Accuracy figures are from the OpenJev model
+cards' validation set; on their 10,000-question benchmark the 27B scores 84.1% and Flash 9B
+79.4%. The OpenJev weights are licensed CC BY-NC 4.0, free for non-commercial use; a
+commercial licence is available from their authors.
 
-The local readout is OpenJev's helper (`helper/shim.py`) redone in Pascal:
-- the same prompt, the same chat template with thinking off;
-- the logits of the option letters at the first output position;
-- `softmax(logit / T)` over the options, and for yes/no `sigmoid(logit(p) / noul_t + noul_bias)`;
-- the family's calibration from the model card: Flash `T = 1.07, noul_t = 1.074766`; 27B
-  `T = 0.85, noul_t = 1.829074`.
+jevban reproduces OpenJev's reference readout: the same prompt and chat template, the scores
+of the option letters at the first output position, and the calibration constants published
+for each model family (overridable with `readout_t`, `noul_t` and `noul_bias`).
 
-The model cards publish these for the vLLM helper. Applying them to GGUF logits is the same
-readout, but the cards don't separately validate it. Override them with `readout_t`, `noul_t`
-and `noul_bias`.
+### Hosted providers
 
-Speed: a decision is one prompt of a few hundred tokens per client. On a 4-core CPU, Flash 9B
-takes tens of seconds per client, so a batch of flagged clients can take minutes. The tail keeps
-its place in the file and catches up afterwards. With a GPU, put llama.cpp libraries built with
-CUDA or Vulkan in `llama_lib_dir` and set `gpu_layers = 999`.
-
-Licence: the OpenJev weights are CC BY-NC 4.0 (non-commercial; a commercial licence from
-support@loopai.com). jevban itself is MIT, and llama.cpp is MIT.
-
-## The decider API (Jev compatible)
-
-`mode = jev` (the default) sends batches as described above to `url`. The request shape is the
-hosted Jev API's, which [OpenJev](https://huggingface.co/openjev/openjev)'s helper
-(`helper/shim.py`, port 3000 in its SERVE.md) serves on top of vLLM. Point `url` at either
-one. Set `api_key` or `JEV_API_KEY` if the server wants a bearer token.
-
-```json
-{"model": "openjev",
- "state": {"server": "<site>",
-           "clients": {
-             "203.0.113.66": {"signature_hits": "env-file,vcs-dir",
-                              "flagged_requests": ["... \"GET /.env HTTP/1.1\" 404 ...",
-                                                   "... \"GET /.git/config HTTP/1.1\" 404 ..."],
-                              "other_recent_requests": []},
-             "198.51.100.7": {"signature_hits": "wordpress", "flagged_requests": ["..."],
-                              "other_recent_requests": ["... \"GET /blog/ HTTP/1.1\" 200 ..."]}}},
- "questions": {
-   "c1": {"type": "noul", "instructions": "Is this client probing for or exploiting ...? Judge only client 203.0.113.66 (state.clients[\"203.0.113.66\"]) ...",
-          "criteria": {"true": "...", "false": "..."}},
-   "c2": {"type": "noul", "instructions": "... Judge only client 198.51.100.7 ..."}}}
+```ini
+[decider]
+provider = typesafe          ; the key comes from api_key = or TYPESAFE_API_KEY
 ```
 
-With `ask_intent = 1`, each client also gets an `i<n>` choice question (`legitimate_visitor`,
-`search_crawler`, `vulnerability_scanner`, `exploit_attempt`, `credential_attack`,
-`abusive_scraper`); the answer goes in the log.
+| `provider` | Service | Model | Key variable | Input, per 1M tokens |
+|---|---|---|---|---|
+| `typesafe` | [Jev API](https://docs.typesafe.ai/api) | `jev-latest` | `TYPESAFE_API_KEY` | $0.042 |
+| `perplexity` | [Perplexity decisions](https://docs.perplexity.ai/docs/decisions/quickstart.md) | `pplx-decider-latest` | `PERPLEXITY_API_KEY` | $0.02 |
+| `perplexity-flash` | same | `pplx-decider-flash-latest` | `PERPLEXITY_API_KEY` | $0.01 |
+| `liquid` | [Liquid AI d1](https://docs.liquid.ai/lfm/models/d1) | `d1.1` | `LIQUID_API_KEY` | see provider |
+| `digitalocean` | [DigitalOcean inference](https://docs.digitalocean.com/products/inference/how-to/use-system-one-api/) | `typesafe-jev-1.13.0` | `MODEL_ACCESS_KEY` | see provider |
+| `abacus` | [Abacus.AI RouteLLM](https://abacus.ai/help/route-llm/systemone) | `jev-latest` | `ABACUS_API_KEY` | $0.042 |
+| `vercel` | [Vercel AI Gateway](https://vercel.com/docs/ai-gateway/sdks-and-apis/typesafe) | `typesafe-ai/jev` | `AI_GATEWAY_API_KEY` | see provider |
 
-`answers.c<n>.noul` (a calibrated probability) is the decision for client n, per flagged request:
+Output tokens are free with all of them. A flagged client costs roughly 500–800 input tokens,
+so 1,000 decisions cost a few cents. Endpoints and model names are from each provider's
+documentation (October 2026); `url =` and `model =` override them. Each endpoint has been
+checked to answer jevban's request; jevban has not yet been run against them with paid keys.
 
-- `>= threshold` (0.80) is a strike;
-- `>= instant_threshold` (0.97) bans at once.
+### Your own server
 
-If the API is down, `on_error = rules` falls back to the signatures for that batch.
-`mode = rules` never calls a model.
+Any server that speaks the Jev request format works with `url =`, for example the OpenJev
+helper (`helper/shim.py`) on top of vLLM:
 
-All the clients in a batch share one `state`. A client's log lines could try to talk about
-another client, but only clients that already tripped a signature are in a batch.
-`batch_clients = 1` keeps every client in a request of its own.
+```ini
+[decider]
+mode = jev
+url = http://127.0.0.1:3000/v1/systemone
+```
 
-Log lines are written by the attacker. They go to the model as quoted data in `state`, never
-as instructions, and the model's answer is a single option letter. The worst a crafted line can
-do is argue its own probability down. `override_score = 10` makes the strong signatures (`.env`,
-`../`, `${jndi:`, `union select`, sqlmap) count as strikes whatever the model says.
+## What it catches
 
-## Signatures (the prefilter)
+| Category | Examples | Weight |
+|---|---|---|
+| Leaked secrets and repositories | `/.env`, `/.git/config`, `/.aws/credentials`, `id_rsa` | 10 |
+| Path traversal, system files | `../`, `/etc/passwd`, `/proc/self/` | 10 |
+| Code execution | `${jndi:` (Log4Shell), shell injection, phpunit and ThinkPHP RCE, router exploits | 10 |
+| SQL injection | `union select`, `sleep(`, `information_schema` | 10 |
+| Scanner tools | sqlmap, nikto, nuclei, zgrab, masscan, wpscan, gobuster, ffuf… | 10 |
+| Admin tools and config files | phpMyAdmin, Adminer, Tomcat manager, `wp-config.php.bak`, `web.config` | 6 |
+| Web shells, phpinfo, XSS, proxy probes, TLS sent to HTTP | `/shell.php`, `/phpinfo.php`, `<script`, `CONNECT` | 6 |
+| Known-bad path, 4xx | any of 2,454 paths from [SecLists](https://github.com/danielmiessler/SecLists) `quickhits` | +6 |
+| Known-bad path that exists (2xx), or a near variant on a 4xx | `/phpinfo2.php` → `/phpinfo.php` | +3 |
+| Site-dependent | WordPress and VPN logins, `/cgi-bin/`, script user agents, backups, 4xx bursts | 3 |
 
-There are about 30 built-in rules, in `Ban.Signatures.pas`:
-
-- secrets in the web root: `.env`, `.git/`, `.aws/`, `id_rsa`, `wp-config.php.bak`
-- path traversal and system files: `../`, `/etc/passwd`
-- code execution: log4shell `${jndi:`, shell injection, ThinkPHP and phpunit RCE, webshell names,
-  router exploits (`/HNAP1`, `/boaform`, `GponForm`)
-- SQL injection, XSS
-- admin panels: phpMyAdmin, Tomcat manager, actuator
-- WordPress and VPN login probes
-- `CONNECT` and proxy probes, TLS bytes sent to plain HTTP
-- scanner user agents: sqlmap, nikto, nuclei, zgrab, masscan
-- a burst of 4xx responses (`flood_4xx`)
-
-Weights: 10 means never legitimate, 6 means almost always a probe, 3 depends on the site. Add
-your own rules with `signatures = /etc/jevban/extra.rules`:
+Weight 10 is never legitimate and bans without asking the model; 6 is almost always a probe;
+3 depends on your site and is left to the model. Add your own rules in a file:
 
 ```
-# <weight> <url|request|agent|any> <tag> <regex>   (case-insensitive; url is decoded path+query)
-10 url  secret-admin  ^/my-hidden-admin
-6  agent bad-bot      BadBot/\d
+# signatures = /etc/jevban/extra.rules
+# <weight> <url|request|agent|any> <tag> <regex>
+10 url   secret-admin  ^/my-hidden-admin
+6  agent bad-bot       BadBot/\d
+```
+
+## Rolling it out safely
+
+A ban that hits a real customer is worse than a missed scanner, so jevban gives you three ways
+to check its judgement before trusting it:
+
+- **`--test FILE`** replays a log and prints every decision without banning anything.
+- **`--shadow`** (or `shadow = 1`) runs live, asks the model and logs its verdict next to each
+  decision, but only the signatures ban. Run it for a week and compare.
+- **`--eval FILE`** replays a labelled log (`attack<TAB>line` or `benign<TAB>line`) and
+  reports, for the signatures alone and for the full pipeline: true and false positives,
+  precision, recall, attackers banned, and benign clients banned.
+
+On the included synthetic WordPress set (`tests/labeled_access.log`, 73 requests from 13
+clients), with Flash 9B on a 4-core CPU:
+
+| | Attack requests caught | Missed | Benign requests flagged | Benign clients banned |
+|---|---|---|---|---|
+| Signatures alone | 7 | 6 | 0 | 0 of 6 |
+| Hard rules + Flash 9B | 13 | 0 | 0 | 0 of 6 |
+
+The model caught a WordPress plugin prober and a password guesser that the signatures can't
+separate from the site's owner, whom it let through. This set is synthetic; label a day of
+your own traffic and run `--eval` before relying on the numbers.
+
+Model verdicts between 0.5 and the strike threshold are logged as `REVIEW` for you to audit.
+
+## Configuration
+
+Settings live in `/etc/jevban/jevban.ini` (or `jevban.ini` next to the binary); the shipped file
+documents every key. The ones you'll want to look at:
+
+| Key | Default | Meaning |
+|---|---|---|
+| `[jevban] logpath` | `/var/log/apache2/access.log` | Logs to follow; comma separated, wildcards allowed |
+| `ignoreip` | `127.0.0.0/8 ::1` | Addresses and CIDR ranges never judged or banned |
+| `findtime` / `maxretry` / `bantime` | `600` / `3` / `3600` | Strikes within seconds, strikes for a ban, ban seconds |
+| `bantime.increment` / `bantime.maxtime` | `1` / `604800` | Double the ban for repeat offenders, up to a week |
+| `[decider] site` | a generic public site | What your server runs, in plain words: **the most important setting** |
+| `mode` | `local` | `local`, `jev` or `rules` |
+| `local_model` | `flash-9b` | Which OpenJev model, or a `.gguf` path |
+| `provider` | | A hosted API: `typesafe`, `perplexity`, `liquid`, … |
+| `threshold` / `instant_threshold` | `0.80` / `0.97` | Model probability for a strike / an instant ban |
+| `override_score` | `10` | Score that strikes without asking the model (0 = model decides all) |
+| `review_threshold` | `0.5` | Model probability logged as REVIEW |
+| `batch_interval` | `5` | Seconds between model batches |
+| `shadow` | `0` | Log the model's verdicts, ban on the rules only |
+| `[action] type` | `iptables` (Linux), `netsh` (Windows) | Firewall backend |
+| `port` | `80,443` | Ports the ban applies to |
+| `dry_run` | `0` | Log firewall commands instead of running them |
+
+A good `site =` makes a large difference. For example:
+
+```ini
+site = A WordPress blog at example.com. The owner logs in at /wp-login.php and edits posts in
+       /wp-admin/; an uptime monitor checks /health with curl. It runs no phpMyAdmin or other
+       PHP apps, and serves no backups or config files.
+```
+
+## Command line
+
+```
+jevban [options]
+  -c, --config FILE      settings (default /etc/jevban/jevban.ini, else next to the binary)
+  -l, --log FILE         access log or wildcard pattern to follow (repeatable)
+      --from-start       read the logs from their start, not just new lines
+  -t, --test FILE        read FILE once, print each decision, ban nothing
+      --eval FILE        replay a labelled log and score the decisions
+      --shadow           ask the model and log its verdicts, but let the signatures ban
+  -n, --dry-run          log the firewall commands instead of running them
+  -m, --mode MODE        local | jev | rules
+      --model NAME       local model, or a .gguf path
+  -p, --provider NAME    a hosted decision API
+  -u, --jev-url URL      a Jev-compatible server
+  -a, --action TYPE      iptables | nftables | ufw | firewalld | fail2ban | netsh | command | none
+  -b, --batch SECONDS    seconds between model batches
+      --list             print the active bans and exit
+  -v, --verbose          log every flagged request and verdict
 ```
 
 ## Firewall actions
 
-| `type` | ban | notes |
-|---|---|---|
-| `iptables` (default) | `-I jevban -s <ip> -j DROP` | own chain hooked on INPUT for `port`; also `ip6tables` |
-| `nftables` | `add element inet jevban v4 { <ip> }` | own table with v4/v6 sets |
-| `ufw` | `prepend deny from <ip> to any port <port> proto tcp` | |
-| `firewalld` | rich rule `drop` | runtime rules only |
-| `fail2ban` | `fail2ban-client set <jail> banip <ip>` | hands the ban to an existing fail2ban jail |
-| `netsh` | `advfirewall firewall add rule ... action=block` | Windows default |
-| `command` | your `actionban`/`actionunban` | tags: `<ip> <v> <family> <fwfamily> <iptables> <name> <port> <jail> <bantime>` |
-| `none` | log only | |
-
-How the actions run, and how bans are kept:
-
-- Actions use fail2ban's lifecycle: `actionstart`, then `actionban`/`actionunban`, then
-  `actionstop`.
-- Bans are kept in `statefile` and re-applied at startup.
-- `bantime.increment` doubles a repeat offender's ban, up to `bantime.maxtime`.
-- `<ip>` is always an address that parsed as IPv4 or IPv6 and was re-printed, so log text
-  never reaches a shell.
-
-## Log formats
-
-The parser reads these formats; it anchors on the `[time]` field, so a vhost prefix needs no
-setting:
-
-- Apache `common`, `combined` and `vhost_combined`
-- nginx's default `combined`
-
-IPv4 and IPv6 clients are both handled. Behind a reverse proxy, log the real client
-(`mod_remoteip`) so `%h` is the client and not the proxy.
-
-`logpath` takes wildcards in the file name. jevban follows logrotate's rename-and-create and its
-copytruncate, and it reads whatever was still written to the old file after a rename. Don't
-let a pattern match the rotated files (`*.log.1`, `*.gz`).
-
-## Files
-
-| File | |
+| `type` | How a ban is applied |
 |---|---|
-| `jevban.lpr` | main loop, signals, `--test` |
-| `Ban.Config.pas` | `jevban.ini` + command line |
-| `Ban.Tail.pas` | tail -F with rotation and wildcards |
-| `Ban.Apache.pas` | access-log parser |
-| `Ban.Signatures.pas` | the weighted regex prefilter |
-| `Ban.BadPaths.pas` | known-bad paths: exact, and near (bounded Levenshtein over a BK-tree) |
-| `data/badpaths.txt` | 2,454 paths scanners probe for (SecLists quickhits, MIT; `data/LICENSE.seclists`) |
-| `Ban.Jev.pas` | `/v1/systemone` client, the decider interface |
-| `Ban.Local.pas` | OpenJev in-process: model download, prompt, letter readout, calibration |
-| `Ban.Llama.pas` | the llama.cpp C API, loaded at run time |
-| `Ban.Engine.pas` | per-client context, strikes, bans, state file |
-| `Ban.Firewall.pas` | action presets and command runner |
-| `Ban.Net.pas` | IPv4/IPv6 + CIDR |
-| `Ban.Https.pas` | HTTP(S) client from [memagent](https://github.com/FMXExpress/Short-Long-Memory-LLM): verified TLS, HTTPS_PROXY tunnel, JSON POST |
+| `iptables` (Linux default) | A `jevban` chain hooked into INPUT for the web ports; IPv6 through `ip6tables` |
+| `nftables` | A `jevban` table with IPv4 and IPv6 address sets |
+| `ufw` | `ufw prepend deny from <ip> to any port <port>` |
+| `firewalld` | A runtime rich rule |
+| `fail2ban` | `fail2ban-client set <jail> banip <ip>`: hand the ban to an existing jail |
+| `netsh` (Windows default) | A Windows Firewall block rule |
+| `command` | Your own `actionban` / `actionunban` commands |
+| `none` | Log only |
+
+Actions follow fail2ban's lifecycle (`actionstart`, `actionban`, `actionunban`, `actionstop`),
+and any of the four commands can be overridden in `[action]` with tags such as `<ip>`,
+`<port>`, `<name>` and `<bantime>`.
+
+## Requirements and performance
+
+- **Linux:** x86-64 with AVX2, glibc 2.35+ (Ubuntu 22.04, Debian 12, Fedora 36 and later); root
+  or `CAP_NET_ADMIN` to change the firewall.
+- **Windows:** x64; an Administrator prompt for the Windows firewall.
+- **Logs:** Apache `common`, `combined` and `vhost_combined`, and nginx's default format, IPv4
+  and IPv6. Rotation by rename or copytruncate is followed. Behind a reverse proxy, log the real
+  client address (`mod_remoteip`).
+- **Memory:** about 1 GB more than the model file in local mode (~7 GB for Flash 9B); a few MB
+  with a hosted API or rules only.
+- **Speed:** the parser, signatures and known-bad paths handle about 16,000 lines a second on
+  one core with typical traffic, and about 7,500 in a flood where every line is a new address
+  (measured with `--test` on 200,000 lines). In local mode on a 4-core
+  CPU, Flash 9B takes about 20–30 seconds per flagged client; batching, verdict caching and
+  hard rules keep the queue small, and the log is caught up afterwards. With a GPU, use
+  llama.cpp libraries built with CUDA or Vulkan (`llama_lib_dir`) and set `gpu_layers = 999`.
+  A hosted API answers in well under a second.
+
+## Security notes
+
+- **Bans come after the fact.** jevban reads the log after the server has answered, so a
+  client's first probes reach your application. It shortens attacks; it does not replace
+  patching, input validation, or a web application firewall.
+- **Log lines are attacker-controlled.** They reach the model only as quoted data, never as
+  instructions, and the model's answer is a single letter, so a crafted request can at most
+  argue its own probability down. Hard rules don't depend on the model at all.
+- **Nothing from a log reaches a shell.** Firewall commands only ever receive an address that
+  parsed as IPv4 or IPv6 and was re-printed.
+- **Local mode keeps logs on the server.** With a hosted API, flagged clients' requests and
+  your `site` description are sent to that provider.
+
+## Building from source
+
+```bash
+make              # build/jevban, with badpaths.txt (Free Pascal 3.2.2)
+make llama        # llama.cpp libraries next to it, for local mode (git, cmake, a C++ compiler)
+make test         # unit tests and a replay of the sample log
+```
+
+To install a source build, copy the contents of `build/` (the binary, `badpaths.txt` and the
+`lib*.so*` files) to `/opt/jevban` with `jevban.ini` and `jevban.service`, as in
+[Quick start](#quick-start).
+
+<details>
+<summary>Project layout</summary>
+
+| File | Purpose |
+|---|---|
+| `jevban.lpr` | Main loop, signals, `--test` and `--eval` |
+| `Ban.Config.pas` | `jevban.ini`, command line, provider presets |
+| `Ban.Tail.pas` | `tail -F` with rotation and wildcards |
+| `Ban.Apache.pas` | Access-log parser and decoding |
+| `Ban.Signatures.pas` | Weighted regex signatures |
+| `Ban.BadPaths.pas` | Known-bad paths: exact, and near (bounded Levenshtein over a BK-tree) |
+| `Ban.Engine.pas` | Triage, batching, strikes, bans, state, evaluation |
+| `Ban.Jev.pas` | Decider interface and the Jev API client |
+| `Ban.Local.pas` | OpenJev in-process: download, prompt, readout, calibration |
+| `Ban.Llama.pas` | llama.cpp C API, loaded at run time |
+| `Ban.Firewall.pas` | Firewall action presets and command runner |
+| `Ban.Net.pas` | IPv4/IPv6 addresses and CIDR ranges |
+| `Ban.Https.pas` | HTTP(S) client with verified TLS and proxy support |
+| `data/badpaths.txt` | Known-bad path list |
+| `tests/` | Unit tests, sample and labelled logs, a mock decision server |
+
+</details>
+
+## License and credits
+
+jevban is released under the [MIT License](LICENSE).
+
+- [OpenJev](https://huggingface.co/openjev/OpenJev-Flash-9B) model weights: CC BY-NC 4.0,
+  downloaded at first use, not bundled.
+- [llama.cpp](https://github.com/ggml-org/llama.cpp): MIT, bundled in the releases.
+- Known-bad paths from [SecLists](https://github.com/danielmiessler/SecLists) by Daniel
+  Miessler: MIT (`data/LICENSE.seclists`).
+- `Ban.Https.pas` comes from [memagent](https://github.com/FMXExpress/Short-Long-Memory-LLM).
+- Jev and the System One API are by [TypeSafe](https://docs.typesafe.ai/introduction); jevban
+  is an independent project and not affiliated with them or with OpenJev's authors.
