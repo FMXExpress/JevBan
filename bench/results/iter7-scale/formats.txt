@@ -1,0 +1,3 @@
+apache   167674 lines/s  parsed 200000, suspicious 2017, strikes 1762, bans 1720
+json      20757 lines/s  parsed 200000, suspicious 2017, strikes 1762, bans 1720
+iis       56266 lines/s  parsed 200000, suspicious 2017, strikes 1762, bans 1720

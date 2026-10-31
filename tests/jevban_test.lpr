@@ -8,7 +8,7 @@ program jevban_test;
 
 uses
   SysUtils, Classes, Math, fpjson, jsonparser,
-  Ban.Net, Ban.Apache, Ban.Signatures, Ban.Jev, Ban.Local, Ban.Config, Ban.BadPaths, Ban.LogFormats, Ban.Tail;
+  Ban.Net, Ban.Apache, Ban.Signatures, Ban.Jev, Ban.Local, Ban.Config, Ban.BadPaths, Ban.LogFormats, Ban.Tail, Ban.Hash;
 
 var
   Failures: Integer = 0;
@@ -206,6 +206,68 @@ begin
     'tail: file ends in a fresh header block');
   Check(Layout('192.0.2.1 - - [31/Oct/2026:10:00:03 +0000] "GET / HTTP/1.1" 200 1') = '',
     'tail: not a W3C log');
+end;
+
+procedure TestStrMap;
+var
+  M: TStrMap;
+  R: TStringList;
+  I, K, LBad, LIdx: Integer;
+  LKey: string;
+  O: TObject;
+begin
+  { random puts, replaces and deletes against a sorted string list, on a small key
+    space so chains collide and backward-shift deletion is exercised }
+  RandSeed := 12345;
+  M := TStrMap.Create(False, 4);
+  R := TStringList.Create;
+  R.Sorted := True;
+  LBad := 0;
+  try
+    for I := 1 to 200000 do
+    begin
+      LKey := 'k' + IntToStr(Random(3000));
+      K := Random(3);
+      if K < 2 then
+      begin
+        M.Put(LKey, TObject(PtrInt(I)));
+        LIdx := R.IndexOf(LKey);
+        if LIdx < 0 then
+          R.AddObject(LKey, TObject(PtrInt(I)))
+        else
+          R.Objects[LIdx] := TObject(PtrInt(I));
+      end
+      else
+      begin
+        LIdx := R.IndexOf(LKey);
+        if M.Delete(LKey) <> (LIdx >= 0) then
+          Inc(LBad);
+        if LIdx >= 0 then
+          R.Delete(LIdx);
+      end;
+    end;
+    for I := 0 to 2999 do
+    begin
+      LKey := 'k' + IntToStr(I);
+      LIdx := R.IndexOf(LKey);
+      O := M.Get(LKey);
+      if (LIdx < 0) <> (O = nil) then
+        Inc(LBad)
+      else if (LIdx >= 0) and (O <> R.Objects[LIdx]) then
+        Inc(LBad);
+    end;
+    Check((LBad = 0) and (M.Count = R.Count), Format('hash map matches a sorted list (%d wrong)', [LBad]));
+    K := 0;
+    for I := 0 to M.Capacity - 1 do
+      if M.Used(I) then
+        Inc(K);
+    Check(K = M.Count, 'hash map: every entry reachable by iteration');
+    M.Clear;
+    Check((M.Count = 0) and (M.Get('k1') = nil), 'hash map clear');
+  finally
+    R.Free;
+    M.Free;
+  end;
 end;
 
 procedure TestSignatures;
@@ -459,6 +521,7 @@ begin
   TestApache;
   TestLogFormats;
   TestTailLayout;
+  TestStrMap;
   TestSignatures;
   TestSignatureFile;
   TestJev;

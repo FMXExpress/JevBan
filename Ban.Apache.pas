@@ -73,6 +73,8 @@ var
   end;
 
 begin
+  if Pos('\', S) = 0 then
+    Exit(S);
   Result := '';
   I := 1;
   while I <= Length(S) do
@@ -108,65 +110,31 @@ end;
 
 function UrlDecode(const S: string): string;
 var
-  I, LVal: Integer;
+  I, N, LVal: Integer;
 begin
-  Result := '';
+  if (Pos('%', S) = 0) and (Pos('+', S) = 0) then
+    Exit(S);
+  { decoding only ever shortens: write in place, trim at the end }
+  SetLength(Result, Length(S));
+  N := 0;
   I := 1;
   while I <= Length(S) do
   begin
+    Inc(N);
     if (S[I] = '%') and (I + 2 <= Length(S)) and
        TryStrToInt('$' + Copy(S, I + 1, 2), LVal) then
     begin
-      Result := Result + Chr(LVal);
+      Result[N] := Chr(LVal);
       Inc(I, 3);
       Continue;
     end;
     if S[I] = '+' then
-      Result := Result + ' '
+      Result[N] := ' '
     else
-      Result := Result + S[I];
+      Result[N] := S[I];
     Inc(I);
   end;
-end;
-
-{ next token: "quoted" (escapes kept), [bracketed], or up to a space }
-function NextToken(const L: string; var P: Integer; out T: string): Boolean;
-var
-  LStart: Integer;
-begin
-  while (P <= Length(L)) and (L[P] = ' ') do
-    Inc(P);
-  if P > Length(L) then
-    Exit(False);
-  Result := True;
-  if L[P] = '"' then
-  begin
-    Inc(P);
-    LStart := P;
-    while (P <= Length(L)) and (L[P] <> '"') do
-    begin
-      if (L[P] = '\') and (P < Length(L)) then
-        Inc(P);
-      Inc(P);
-    end;
-    T := '"' + Copy(L, LStart, P - LStart);   { the quote marks the kind }
-    Inc(P);
-  end
-  else if L[P] = '[' then
-  begin
-    LStart := P;
-    while (P <= Length(L)) and (L[P] <> ']') do
-      Inc(P);
-    T := Copy(L, LStart, P - LStart + 1);
-    Inc(P);
-  end
-  else
-  begin
-    LStart := P;
-    while (P <= Length(L)) and (L[P] <> ' ') do
-      Inc(P);
-    T := Copy(L, LStart, P - LStart);
-  end;
+  SetLength(Result, N);
 end;
 
 const
@@ -174,7 +142,23 @@ const
     'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec');
 
 { [10/Oct/2000:13:55:36 -0700] }
+threadvar
+  { log lines come in time order: most share the previous line's second }
+  GLastTimeText: string;
+  GLastTime: Int64;
+
+function ParseApacheTimeUncached(const S: string): Int64; forward;
+
 function ParseApacheTime(const S: string): Int64;
+begin
+  if S = GLastTimeText then
+    Exit(GLastTime);
+  Result := ParseApacheTimeUncached(S);
+  GLastTimeText := S;
+  GLastTime := Result;
+end;
+
+function ParseApacheTimeUncached(const S: string): Int64;
 var
   LDay, LMon, LYear, LHour, LMin, LSec, LOff, I: Integer;
   LText: string;
@@ -231,55 +215,107 @@ begin
     end;
 end;
 
-function Unquote(const T: string): string;
+type
+  { a token's place in the line: its text is copied only if the parser uses it }
+  TSpan = record
+    Start, Len: Integer;
+    Kind: Char;   { '"' quoted (Start/Len: inside the quotes), '[' bracketed (with the brackets), ' ' plain }
+  end;
+
+{ next token: "quoted" (escapes kept), [bracketed], or up to a space; as NextToken }
+function NextSpan(const L: string; var P: Integer; out T: TSpan): Boolean;
+var
+  N: Integer;
 begin
-  if (T <> '') and (T[1] = '"') then
-    Result := Copy(T, 2, MaxInt)
+  N := Length(L);
+  while (P <= N) and (L[P] = ' ') do
+    Inc(P);
+  if P > N then
+    Exit(False);
+  Result := True;
+  if L[P] = '"' then
+  begin
+    Inc(P);
+    T.Start := P;
+    while (P <= N) and (L[P] <> '"') do
+    begin
+      if (L[P] = '\') and (P < N) then
+        Inc(P);
+      Inc(P);
+    end;
+    T.Len := P - T.Start;
+    T.Kind := '"';
+    Inc(P);
+  end
+  else if L[P] = '[' then
+  begin
+    T.Start := P;
+    while (P <= N) and (L[P] <> ']') do
+      Inc(P);
+    T.Len := P - T.Start + 1;
+    T.Kind := '[';
+    Inc(P);
+  end
   else
-    Result := T;
+  begin
+    T.Start := P;
+    while (P <= N) and (L[P] <> ' ') do
+      Inc(P);
+    T.Len := P - T.Start;
+    T.Kind := ' ';
+  end;
 end;
 
 function ParseAccessLine(const ALine: string; out E: TAccessEntry): Boolean;
 var
-  LTokens: TStringList;
-  LTok, LReq: string;
-  P, LTime: Integer;
+  LTok: array[0..15] of TSpan;
+  P, LTime, N: Integer;
+
+  { the token's text; a quoted one without its quotes (what Unquote gave) }
+  function Text(AIdx: Integer): string; inline;
+  begin
+    Result := Copy(ALine, LTok[AIdx].Start, LTok[AIdx].Len);
+  end;
+
+  { the token as NextToken returned it: a quoted one keeps its opening quote }
+  function Raw(AIdx: Integer): string;
+  begin
+    Result := Text(AIdx);
+    if LTok[AIdx].Kind = '"' then
+      Result := '"' + Result;
+  end;
+
 begin
   Result := False;
   E := Default(TAccessEntry);
-  LTokens := TStringList.Create;
-  try
-    P := 1;
-    LTime := -1;
-    while (LTokens.Count < 16) and NextToken(ALine, P, LTok) do
-    begin
-      if (LTime < 0) and (LTok <> '') and (LTok[1] = '[') then
-        LTime := LTokens.Count;
-      LTokens.Add(LTok);
-    end;
-    { host ident user [time] "request" status bytes }
-    if (LTime < 3) or (LTokens.Count < LTime + 4) then
-      Exit;
-    if not ParseIp(LTokens[LTime - 3], E.Ip) then
-      Exit;
-    E.IpText := IpToStr(E.Ip);
-    if LTime >= 4 then
-      E.VHost := LTokens[LTime - 4];
-    E.TimeText := LTokens[LTime];
-    E.Epoch := ParseApacheTime(E.TimeText);
-    LReq := LTokens[LTime + 1];
-    if (LReq = '') or (LReq[1] <> '"') then
-      Exit;
-    E.Request := Unquote(LReq);
-    E.Status := StrToIntDef(LTokens[LTime + 2], 0);
-    E.Bytes := StrToInt64Def(LTokens[LTime + 3], 0);
-    if LTokens.Count > LTime + 4 then
-      E.Referer := Unquote(LTokens[LTime + 4]);
-    if LTokens.Count > LTime + 5 then
-      E.Agent := Unquote(LTokens[LTime + 5]);
-  finally
-    LTokens.Free;
+  P := 1;
+  LTime := -1;
+  N := 0;
+  while (N < 16) and NextSpan(ALine, P, LTok[N]) do
+  begin
+    if (LTime < 0) and (LTok[N].Kind = '[') then
+      LTime := N;
+    Inc(N);
   end;
+  { host ident user [time] "request" status bytes }
+  if (LTime < 3) or (N < LTime + 4) then
+    Exit;
+  if not ParseIp(Raw(LTime - 3), E.Ip) then
+    Exit;
+  E.IpText := IpToStr(E.Ip);
+  if LTime >= 4 then
+    E.VHost := Raw(LTime - 4);
+  E.TimeText := Text(LTime);
+  E.Epoch := ParseApacheTime(E.TimeText);
+  if LTok[LTime + 1].Kind <> '"' then
+    Exit;
+  E.Request := Text(LTime + 1);
+  E.Status := StrToIntDef(Raw(LTime + 2), 0);
+  E.Bytes := StrToInt64Def(Raw(LTime + 3), 0);
+  if N > LTime + 4 then
+    E.Referer := Text(LTime + 4);
+  if N > LTime + 5 then
+    E.Agent := Text(LTime + 5);
   SplitRequest(E);
   Result := True;
 end;
@@ -314,21 +350,22 @@ end;
 function CompactSummary(const E: TAccessEntry; const AClientAgent: string; AMaxLen: Integer): string;
 begin
   { [10/Oct/2000:13:55:36 -0700] -> 13:55:36 }
-  Result := Format('%s %s %d %d', [Copy(E.TimeText, 14, 8), E.Request, E.Status, E.Bytes]);
+  { concatenation, not Format: this runs for every line }
+  Result := Copy(E.TimeText, 14, 8) + ' ' + E.Request + ' ' + IntToStr(E.Status) + ' ' + IntToStr(E.Bytes);
   if (E.Referer <> '-') and (E.Referer <> '') then
-    Result := Result + Format(' ref="%s"', [E.Referer]);
+    Result := Result + ' ref="' + E.Referer + '"';
   if E.Agent <> AClientAgent then
-    Result := Result + Format(' ua="%s"', [E.Agent]);
+    Result := Result + ' ua="' + E.Agent + '"';
   if Length(Result) > AMaxLen then
     Result := Copy(Result, 1, AMaxLen) + '...';
 end;
 
 function EntrySummary(const E: TAccessEntry; AMaxLen: Integer): string;
 begin
-  Result := Format('%s "%s" %d %d ua="%s"', [Copy(E.TimeText, 2, 20), E.Request, E.Status,
-    E.Bytes, E.Agent]);
+  Result := Copy(E.TimeText, 2, 20) + ' "' + E.Request + '" ' + IntToStr(E.Status) + ' ' + IntToStr(E.Bytes) +
+    ' ua="' + E.Agent + '"';
   if (E.Referer <> '-') and (E.Referer <> '') then
-    Result := Result + Format(' ref="%s"', [E.Referer]);
+    Result := Result + ' ref="' + E.Referer + '"';
   if Length(Result) > AMaxLen then
     Result := Copy(Result, 1, AMaxLen) + '...';
 end;

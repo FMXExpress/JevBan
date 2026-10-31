@@ -69,6 +69,7 @@ type
     BatchClients: Integer;    { ... or when this many clients are queued (one request each flush) }
     AskIntent: Boolean;       { also ask what each client is doing (a second readout per client) }
     MaxPerMinute: Integer;    { decider calls; beyond it, rules decide }
+    DeciderBacklog: Integer;  { batches waiting for a busy decider; beyond it, rules decide; 0 = no limit }
     OnError: string;          { rules | skip }
     RulesMinScore: Integer;   { rules: a strike }
     RulesInstantScore: Integer;
@@ -240,6 +241,7 @@ begin
   BatchLines := 1000;
   BatchClients := 8;
   MaxPerMinute := 120;
+  DeciderBacklog := 4;
   OnError := 'rules';
   RulesMinScore := 6;
   RulesInstantScore := 20;
@@ -446,6 +448,7 @@ begin
       BatchClients := LIni.ReadInteger('decider', 'batch_clients', BatchClients);
       AskIntent := LIni.ReadBool('decider', 'ask_intent', AskIntent);
       MaxPerMinute := LIni.ReadInteger('decider', 'max_per_minute', MaxPerMinute);
+      DeciderBacklog := LIni.ReadInteger('decider', 'decider_backlog', DeciderBacklog);
       OnError := LowerCase(LIni.ReadString('decider', 'on_error', OnError));
       RulesMinScore := LIni.ReadInteger('decider', 'rules_min_score', RulesMinScore);
       RulesInstantScore := LIni.ReadInteger('decider', 'rules_instant_score', RulesInstantScore);

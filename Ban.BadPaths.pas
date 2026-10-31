@@ -19,7 +19,7 @@ unit Ban.BadPaths;
 interface
 
 uses
-  SysUtils, Classes, Math;
+  SysUtils, Classes, Math, Ban.Hash;
 
 type
   TBkChild = record
@@ -30,6 +30,12 @@ type
   TBkNode = record
     Text: string;
     Kids: array of TBkChild;
+    MaxKid: Integer;   { the largest child distance }
+  end;
+
+  TNearHit = class
+    Text: string;
+    Dist: Integer;
   end;
 
   TBadPaths = class
@@ -37,7 +43,9 @@ type
     FExact: TStringList;
     FTree: array of TBkNode;
     FCount: Integer;
+    FNearCache: TStrMap;   { normalized path -> TNearHit }
     procedure TreeAdd(const S: string);
+    function NearSearch(const ANormPath: string; out ADist: Integer): string;
   public
     constructor Create;
     destructor Destroy; override;
@@ -144,33 +152,58 @@ begin
 end;
 
 function BoundedLevenshtein(const A, B: string; AMax: Integer): Integer;
+const
+  CStack = 1024;
 var
-  LPrev, LCur: array of Integer;
-  I, J, LCost, LRowMin: Integer;
+  LBufA, LBufB: array[0..CStack - 1] of Integer;
+  LDynA, LDynB: array of Integer;
+  LPrev, LCur, LSwap: PInteger;
+  I, J, LCost, LRowMin, V, LenB: Integer;
+  PA, PB: PChar;
 begin
   if Abs(Length(A) - Length(B)) > AMax then
     Exit(AMax + 1);
-  SetLength(LPrev, Length(B) + 1);
-  SetLength(LCur, Length(B) + 1);
-  for J := 0 to Length(B) do
+  LenB := Length(B);
+  { two rows, on the stack for any path up to 1023 characters }
+  if LenB < CStack then
+  begin
+    LPrev := @LBufA[0];
+    LCur := @LBufB[0];
+  end
+  else
+  begin
+    SetLength(LDynA, LenB + 1);
+    SetLength(LDynB, LenB + 1);
+    LPrev := @LDynA[0];
+    LCur := @LDynB[0];
+  end;
+  PA := PChar(A);
+  PB := PChar(B);
+  for J := 0 to LenB do
     LPrev[J] := J;
   for I := 1 to Length(A) do
   begin
     LCur[0] := I;
-    LRowMin := LCur[0];
-    for J := 1 to Length(B) do
+    LRowMin := I;
+    for J := 1 to LenB do
     begin
-      LCost := Ord(A[I] <> B[J]);
-      LCur[J] := Min(Min(LPrev[J] + 1, LCur[J - 1] + 1), LPrev[J - 1] + LCost);
-      if LCur[J] < LRowMin then
-        LRowMin := LCur[J];
+      LCost := Ord(PA[I - 1] <> PB[J - 1]);
+      V := LPrev[J - 1] + LCost;
+      if LPrev[J] + 1 < V then
+        V := LPrev[J] + 1;
+      if LCur[J - 1] + 1 < V then
+        V := LCur[J - 1] + 1;
+      LCur[J] := V;
+      if V < LRowMin then
+        LRowMin := V;
     end;
     if LRowMin > AMax then
       Exit(AMax + 1);
-    for J := 0 to Length(B) do
-      LPrev[J] := LCur[J];
+    LSwap := LPrev;
+    LPrev := LCur;
+    LCur := LSwap;
   end;
-  Result := Min(LPrev[Length(B)], AMax + 1);
+  Result := Min(LPrev[LenB], AMax + 1);
 end;
 
 { TBadPaths }
@@ -182,10 +215,12 @@ begin
   FExact.Sorted := True;
   FExact.Duplicates := dupIgnore;
   FExact.CaseSensitive := True;
+  FNearCache := TStrMap.Create(True, 1024);
 end;
 
 destructor TBadPaths.Destroy;
 begin
+  FNearCache.Free;
   FExact.Free;
   inherited Destroy;
 end;
@@ -223,6 +258,8 @@ begin
       SetLength(FTree[LNode].Kids, I + 1);
       FTree[LNode].Kids[I].Dist := D;
       FTree[LNode].Kids[I].Node := High(FTree);
+      if D > FTree[LNode].MaxKid then
+        FTree[LNode].MaxKid := D;
       Exit;
     end;
   until False;
@@ -239,6 +276,7 @@ begin
     Exit;
   FExact.Add(LPath);
   Inc(FCount);
+  FNearCache.Clear;
   { a near match is at most 2 edits from a query of 8 or more characters }
   if Length(LPath) >= 6 then
     TreeAdd(LPath);
@@ -268,6 +306,28 @@ begin
 end;
 
 function TBadPaths.Near(const ANormPath: string; out ADist: Integer): string;
+const
+  CCacheMax = 50000;
+var
+  LHit: TNearHit;
+begin
+  (* scanners walk the same word lists from many addresses, and a site's own
+     broken links repeat: one search per distinct path. Capped (an attacker
+     can send every path once), then started over *)
+  LHit := TNearHit(FNearCache.Get(ANormPath));
+  if LHit = nil then
+  begin
+    if FNearCache.Count >= CCacheMax then
+      FNearCache.Clear;
+    LHit := TNearHit.Create;
+    LHit.Text := NearSearch(ANormPath, LHit.Dist);
+    FNearCache.Put(ANormPath, LHit);
+  end;
+  ADist := LHit.Dist;
+  Result := LHit.Text;
+end;
+
+function TBadPaths.NearSearch(const ANormPath: string; out ADist: Integer): string;
 var
   LStack: array of Integer;
   LTop, LNode, D, I, LMax: Integer;
@@ -284,8 +344,11 @@ begin
   begin
     LNode := LStack[LTop];
     Dec(LTop);
-    { pruning by the triangle inequality needs the exact distance }
-    D := BoundedLevenshtein(ANormPath, FTree[LNode].Text, MaxInt div 2);
+    (* pruning by the triangle inequality visits the children within LMax of
+       the distance; past MaxKid + LMax no child qualifies (and neither does
+       the node), so the distance is only needed exactly up to there. Most
+       nodes are leaves: bounded at LMax, rejected within a few rows *)
+    D := BoundedLevenshtein(ANormPath, FTree[LNode].Text, Max(LMax, FTree[LNode].MaxKid + LMax));
     if (D <= LMax) and (D < ADist) then
     begin
       ADist := D;

@@ -17,7 +17,7 @@ unit Ban.Signatures;
 interface
 
 uses
-  SysUtils, Classes, RegExpr, Ban.Apache;
+  SysUtils, Classes, RegExpr, Ban.Apache, Ban.Hash;
 
 type
   TSigField = (sfUrl, sfRequest, sfAgent, sfAny);
@@ -30,9 +30,23 @@ type
     destructor Destroy; override;
   end;
 
+  { which rules matched one field value: bit I = rule I }
+  TSigMatch = class
+    Bits: array of QWord;
+  end;
+
   TSignatureSet = class
   private
     FItems: TList;
+    (* per field, the rules each distinct value matched. Pages, assets, user
+       agents and a scanner's word list repeat: on typical traffic most lines
+       run no regular expression at all. Values over 512 characters are not
+       cached, and each cache starts over at 20,000 values, so memory stays
+       bounded whatever an attacker sends *)
+    FCache: array[TSigField] of TStrMap;
+    FHasField: array[TSigField] of Boolean;
+    FScratch: array[TSigField] of TSigMatch;   { for values too long to cache; Score runs on one thread }
+    function Match(AField: TSigField; const AText: string; AScratch: TSigMatch): TSigMatch;
     procedure AddRule(AWeight: Integer; AField: TSigField; const ATag, ARegex: string);
   public
     constructor Create(ABuiltin: Boolean = True);
@@ -52,9 +66,16 @@ begin
 end;
 
 constructor TSignatureSet.Create(ABuiltin: Boolean);
+var
+  LField: TSigField;
 begin
   inherited Create;
   FItems := TList.Create;
+  for LField := Low(TSigField) to High(TSigField) do
+  begin
+    FCache[LField] := TStrMap.Create(True, 1024);
+    FScratch[LField] := TSigMatch.Create;
+  end;
   if not ABuiltin then
     Exit;
   { secrets and repositories left in the web root }
@@ -127,7 +148,13 @@ end;
 destructor TSignatureSet.Destroy;
 var
   I: Integer;
+  LField: TSigField;
 begin
+  for LField := Low(TSigField) to High(TSigField) do
+  begin
+    FCache[LField].Free;
+    FScratch[LField].Free;
+  end;
   for I := 0 to FItems.Count - 1 do
     TSignature(FItems[I]).Free;
   FItems.Free;
@@ -137,6 +164,7 @@ end;
 procedure TSignatureSet.AddRule(AWeight: Integer; AField: TSigField; const ATag, ARegex: string);
 var
   LSig: TSignature;
+  LField: TSigField;
 begin
   LSig := TSignature.Create;
   LSig.Tag := ATag;
@@ -155,6 +183,10 @@ begin
     end;
   end;
   FItems.Add(LSig);
+  FHasField[AField] := True;
+  { cached bit sets are sized for the rules there were }
+  for LField := Low(TSigField) to High(TSigField) do
+    FCache[LField].Clear;
 end;
 
 procedure TSignatureSet.LoadFile(const AFile: string);
@@ -205,25 +237,67 @@ begin
   end;
 end;
 
+function TSignatureSet.Match(AField: TSigField; const AText: string; AScratch: TSigMatch): TSigMatch;
+const
+  CMaxKey = 512;
+  CMaxEntries = 20000;
+var
+  I: Integer;
+  LSig: TSignature;
+  LCache: Boolean;
+begin
+  LCache := Length(AText) <= CMaxKey;
+  if LCache then
+  begin
+    Result := TSigMatch(FCache[AField].Get(AText));
+    if Result <> nil then
+      Exit;
+    Result := TSigMatch.Create;
+  end
+  else
+    Result := AScratch;
+  SetLength(Result.Bits, (FItems.Count + 63) div 64);
+  FillChar(Result.Bits[0], Length(Result.Bits) * SizeOf(QWord), 0);
+  for I := 0 to FItems.Count - 1 do
+  begin
+    LSig := TSignature(FItems[I]);
+    if (LSig.Field = AField) and LSig.Re.Exec(AText) then
+      Result.Bits[I shr 6] := Result.Bits[I shr 6] or (QWord(1) shl (I and 63));
+  end;
+  if LCache then
+  begin
+    if FCache[AField].Count >= CMaxEntries then
+      FCache[AField].Clear;
+    FCache[AField].Put(AText, Result);
+  end;
+end;
+
 function TSignatureSet.Score(const E: TAccessEntry; ATags: TStrings): Integer;
 var
   I: Integer;
   LSig: TSignature;
-  LText, LAny: string;
+  LField: TSigField;
+  LMatch: array[TSigField] of TSigMatch;
 begin
   Result := 0;
-  LAny := E.Decoded + #10 + E.Agent + #10 + E.Referer;
+  if FItems.Count = 0 then
+    Exit;
+  for LField := Low(TSigField) to High(TSigField) do
+    if FHasField[LField] then
+      case LField of
+        sfUrl: LMatch[LField] := Match(LField, E.Decoded, FScratch[LField]);
+        sfRequest: LMatch[LField] := Match(LField, E.Request, FScratch[LField]);
+        sfAgent: LMatch[LField] := Match(LField, E.Agent, FScratch[LField]);
+      else
+        LMatch[LField] := Match(LField, E.Decoded + #10 + E.Agent + #10 + E.Referer, FScratch[LField]);
+      end
+    else
+      LMatch[LField] := nil;
+  { the rules in their order, so tags come out as they always have }
   for I := 0 to FItems.Count - 1 do
   begin
     LSig := TSignature(FItems[I]);
-    case LSig.Field of
-      sfUrl: LText := E.Decoded;
-      sfRequest: LText := E.Request;
-      sfAgent: LText := E.Agent;
-    else
-      LText := LAny;
-    end;
-    if LSig.Re.Exec(LText) then
+    if LMatch[LSig.Field].Bits[I shr 6] and (QWord(1) shl (I and 63)) <> 0 then
     begin
       Inc(Result, LSig.Weight);
       if ATags <> nil then
