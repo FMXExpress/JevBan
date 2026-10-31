@@ -313,6 +313,17 @@ Signatures and behaviour rules alone (no model), held-out test splits and LogarX
 
 The attackers the rules still miss are the ones that look like ordinary use (password
 guessing, plugin probing, stealthy scanning between page views); those are the model's job.
+Adding Flash 9B on the same held-out test splits (4-core CPU):
+
+| | Benign clients banned | Attackers banned, rules alone | Attackers banned, rules + Flash 9B |
+|---|---|---|---|
+| WordPress test | 0 of 73 | 44 of 51 | 47 of 51 |
+| Static site test | 0 of 72 | 43 of 52 | 46 of 52 |
+| Web app test | 0 of 79 | 41 of 51 | 43 of 51 |
+
+The model adds the password guessers on the WordPress and static sites and a few plugin and
+exploit probers, and bans no one the rules spared. Scanners hidden between ordinary page views
+(`stealth`, 3 per split) are still missed by both.
 
 ## Configuration
 
@@ -404,7 +415,7 @@ and any of the four commands can be overridden in `[action]` with tags such as `
 - **Speed:** the parser, signatures and known-bad paths handle about 16,000 lines a second on
   one core with typical traffic, and about 7,500 in a flood where every line is a new address
   (measured with `--test` on 200,000 lines). In local mode on a 4-core
-  CPU, Flash 9B takes about 20–30 seconds per flagged client; batching, verdict caching and
+  CPU, Flash 9B reads about 20 prompt tokens a second, about 20 seconds per flagged client; batching, verdict caching and
   hard rules keep the queue small, and the log is caught up afterwards. With a GPU, use
   llama.cpp libraries built with CUDA or Vulkan (`llama_lib_dir`) and set `gpu_layers = 999`.
   A hosted API answers in well under a second.

@@ -1,0 +1,349 @@
+{
+  "decider" : "local OpenJev-Flash-9B-Q4_K_M.gguf (qwen35 9B Q4_K - Medium, 4 threads)",
+  "shadow" : false,
+  "lines" : 1462,
+  "requests" : {
+    "rules" : {
+      "tp" : 76,
+      "fp" : 0,
+      "fn" : 41,
+      "tn" : 917,
+      "precision" : 1.0000000000000000E+000,
+      "recall" : 6.4957264957264960E-001
+    },
+    "live" : {
+      "tp" : 67,
+      "fp" : 2,
+      "fn" : 50,
+      "tn" : 915,
+      "precision" : 9.7101449275362317E-001,
+      "recall" : 5.7264957264957261E-001
+    }
+  },
+  "after_ban" : {
+    "attack" : 428,
+    "benign" : 0
+  },
+  "clients" : {
+    "attack" : 51,
+    "attack_banned" : 47,
+    "benign" : 73,
+    "benign_banned" : 0,
+    "leaked_attack_requests" : 182,
+    "leaked_per_banned_attacker_median" : 4.0000000000000000E+000,
+    "seconds_to_ban_median" : 5.0000000000000000E+000
+  },
+  "categories" : {
+    "attack:credential" : {
+      "clients" : 3,
+      "banned" : 3,
+      "rules" : {
+        "tp" : 0,
+        "fp" : 0,
+        "fn" : 8,
+        "tn" : 0,
+        "precision" : -1.0000000000000000E+000,
+        "recall" : 0.0000000000000000E+000
+      },
+      "live" : {
+        "tp" : 7,
+        "fp" : 0,
+        "fn" : 1,
+        "tn" : 0,
+        "precision" : 1.0000000000000000E+000,
+        "recall" : 8.7500000000000000E-001
+      }
+    },
+    "attack:distributed" : {
+      "clients" : 15,
+      "banned" : 15,
+      "rules" : {
+        "tp" : 5,
+        "fp" : 0,
+        "fn" : 0,
+        "tn" : 0,
+        "precision" : 1.0000000000000000E+000,
+        "recall" : 1.0000000000000000E+000
+      },
+      "live" : {
+        "tp" : 5,
+        "fp" : 0,
+        "fn" : 0,
+        "tn" : 0,
+        "precision" : 1.0000000000000000E+000,
+        "recall" : 1.0000000000000000E+000
+      }
+    },
+    "attack:evasion" : {
+      "clients" : 4,
+      "banned" : 4,
+      "rules" : {
+        "tp" : 8,
+        "fp" : 0,
+        "fn" : 0,
+        "tn" : 0,
+        "precision" : 1.0000000000000000E+000,
+        "recall" : 1.0000000000000000E+000
+      },
+      "live" : {
+        "tp" : 7,
+        "fp" : 0,
+        "fn" : 1,
+        "tn" : 0,
+        "precision" : 1.0000000000000000E+000,
+        "recall" : 8.7500000000000000E-001
+      }
+    },
+    "attack:exploit" : {
+      "clients" : 6,
+      "banned" : 5,
+      "rules" : {
+        "tp" : 10,
+        "fp" : 0,
+        "fn" : 0,
+        "tn" : 0,
+        "precision" : 1.0000000000000000E+000,
+        "recall" : 1.0000000000000000E+000
+      },
+      "live" : {
+        "tp" : 10,
+        "fp" : 0,
+        "fn" : 0,
+        "tn" : 0,
+        "precision" : 1.0000000000000000E+000,
+        "recall" : 1.0000000000000000E+000
+      }
+    },
+    "attack:injection" : {
+      "clients" : 2,
+      "banned" : 2,
+      "rules" : {
+        "tp" : 6,
+        "fp" : 0,
+        "fn" : 0,
+        "tn" : 0,
+        "precision" : 1.0000000000000000E+000,
+        "recall" : 1.0000000000000000E+000
+      },
+      "live" : {
+        "tp" : 6,
+        "fp" : 0,
+        "fn" : 0,
+        "tn" : 0,
+        "precision" : 1.0000000000000000E+000,
+        "recall" : 1.0000000000000000E+000
+      }
+    },
+    "attack:slow" : {
+      "clients" : 2,
+      "banned" : 2,
+      "rules" : {
+        "tp" : 8,
+        "fp" : 0,
+        "fn" : 0,
+        "tn" : 0,
+        "precision" : 1.0000000000000000E+000,
+        "recall" : 1.0000000000000000E+000
+      },
+      "live" : {
+        "tp" : 8,
+        "fp" : 0,
+        "fn" : 0,
+        "tn" : 0,
+        "precision" : 1.0000000000000000E+000,
+        "recall" : 1.0000000000000000E+000
+      }
+    },
+    "attack:stealth" : {
+      "clients" : 3,
+      "banned" : 0,
+      "rules" : {
+        "tp" : 0,
+        "fp" : 0,
+        "fn" : 16,
+        "tn" : 0,
+        "precision" : -1.0000000000000000E+000,
+        "recall" : 0.0000000000000000E+000
+      },
+      "live" : {
+        "tp" : 0,
+        "fp" : 0,
+        "fn" : 16,
+        "tn" : 0,
+        "precision" : -1.0000000000000000E+000,
+        "recall" : 0.0000000000000000E+000
+      }
+    },
+    "attack:variant" : {
+      "clients" : 5,
+      "banned" : 5,
+      "rules" : {
+        "tp" : 5,
+        "fp" : 0,
+        "fn" : 3,
+        "tn" : 0,
+        "precision" : 1.0000000000000000E+000,
+        "recall" : 6.2500000000000000E-001
+      },
+      "live" : {
+        "tp" : 7,
+        "fp" : 0,
+        "fn" : 1,
+        "tn" : 0,
+        "precision" : 1.0000000000000000E+000,
+        "recall" : 8.7500000000000000E-001
+      }
+    },
+    "attack:wordlist" : {
+      "clients" : 8,
+      "banned" : 8,
+      "rules" : {
+        "tp" : 19,
+        "fp" : 0,
+        "fn" : 0,
+        "tn" : 0,
+        "precision" : 1.0000000000000000E+000,
+        "recall" : 1.0000000000000000E+000
+      },
+      "live" : {
+        "tp" : 17,
+        "fp" : 0,
+        "fn" : 2,
+        "tn" : 0,
+        "precision" : 1.0000000000000000E+000,
+        "recall" : 8.9473684210526316E-001
+      }
+    },
+    "attack:wp-plugins" : {
+      "clients" : 3,
+      "banned" : 3,
+      "rules" : {
+        "tp" : 15,
+        "fp" : 0,
+        "fn" : 14,
+        "tn" : 0,
+        "precision" : 1.0000000000000000E+000,
+        "recall" : 5.1724137931034486E-001
+      },
+      "live" : {
+        "tp" : 0,
+        "fp" : 0,
+        "fn" : 29,
+        "tn" : 0,
+        "precision" : -1.0000000000000000E+000,
+        "recall" : 0.0000000000000000E+000
+      }
+    },
+    "benign:crawler" : {
+      "clients" : 8,
+      "banned" : 0,
+      "rules" : {
+        "tp" : 0,
+        "fp" : 0,
+        "fn" : 0,
+        "tn" : 120,
+        "precision" : -1.0000000000000000E+000,
+        "recall" : -1.0000000000000000E+000
+      },
+      "live" : {
+        "tp" : 0,
+        "fp" : 0,
+        "fn" : 0,
+        "tn" : 120,
+        "precision" : -1.0000000000000000E+000,
+        "recall" : -1.0000000000000000E+000
+      }
+    },
+    "benign:linkchecker" : {
+      "clients" : 2,
+      "banned" : 0,
+      "rules" : {
+        "tp" : 0,
+        "fp" : 0,
+        "fn" : 0,
+        "tn" : 34,
+        "precision" : -1.0000000000000000E+000,
+        "recall" : -1.0000000000000000E+000
+      },
+      "live" : {
+        "tp" : 0,
+        "fp" : 0,
+        "fn" : 0,
+        "tn" : 34,
+        "precision" : -1.0000000000000000E+000,
+        "recall" : -1.0000000000000000E+000
+      }
+    },
+    "benign:monitor" : {
+      "clients" : 2,
+      "banned" : 0,
+      "rules" : {
+        "tp" : 0,
+        "fp" : 0,
+        "fn" : 0,
+        "tn" : 46,
+        "precision" : -1.0000000000000000E+000,
+        "recall" : -1.0000000000000000E+000
+      },
+      "live" : {
+        "tp" : 0,
+        "fp" : 0,
+        "fn" : 0,
+        "tn" : 46,
+        "precision" : -1.0000000000000000E+000,
+        "recall" : -1.0000000000000000E+000
+      }
+    },
+    "benign:owner" : {
+      "clients" : 1,
+      "banned" : 0,
+      "rules" : {
+        "tp" : 0,
+        "fp" : 0,
+        "fn" : 0,
+        "tn" : 7,
+        "precision" : -1.0000000000000000E+000,
+        "recall" : -1.0000000000000000E+000
+      },
+      "live" : {
+        "tp" : 0,
+        "fp" : 2,
+        "fn" : 0,
+        "tn" : 5,
+        "precision" : 0.0000000000000000E+000,
+        "recall" : -1.0000000000000000E+000
+      }
+    },
+    "benign:visitor" : {
+      "clients" : 60,
+      "banned" : 0,
+      "rules" : {
+        "tp" : 0,
+        "fp" : 0,
+        "fn" : 0,
+        "tn" : 710,
+        "precision" : -1.0000000000000000E+000,
+        "recall" : -1.0000000000000000E+000
+      },
+      "live" : {
+        "tp" : 0,
+        "fp" : 0,
+        "fn" : 0,
+        "tn" : 710,
+        "precision" : -1.0000000000000000E+000,
+        "recall" : -1.0000000000000000E+000
+      }
+    }
+  },
+  "model" : {
+    "hard_rule_decisions" : 34,
+    "requests" : 110,
+    "clients" : 137,
+    "errors" : 0,
+    "reviews" : 5,
+    "wall_seconds" : 2.8761929998872802E+003,
+    "prompts" : 137,
+    "prompt_tokens" : 56806,
+    "prompt_ms" : 2860891
+  }
+}
