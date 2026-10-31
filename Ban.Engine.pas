@@ -26,14 +26,19 @@ unit Ban.Engine;
    it is still probing. The model judges the middle ground, and a p between
    review_threshold and threshold is logged as REVIEW. With shadow = 1 the
    model's verdicts are only logged; the rules ban. --eval replays a labelled
-   log and counts both against the labels. *)
+   log and counts both against the labels.
+
+   The live daemon asks the decider on a worker thread (TDeciderWorker): a
+   batch can take minutes on a CPU, and meanwhile the log is still read, hard
+   rules still ban and expired bans are still lifted. --test and --eval ask
+   inline, so a replay is deterministic. *)
 
 {$mode objfpc}{$H+}
 
 interface
 
 uses
-  SysUtils, Classes, Math, Contnrs, fpjson, jsonparser,
+  SysUtils, Classes, Math, Contnrs, SyncObjs, fpjson, jsonparser,
   Ban.Net, Ban.Apache, Ban.Signatures, Ban.BadPaths, Ban.Jev, Ban.Local, Ban.Firewall, Ban.Config;
 
 const
@@ -91,6 +96,7 @@ type
     PendingTags: TStringList;  { all tags of the pending requests (sent to the decider) }
     PendingSince: Int64;
     Queued: Boolean;
+    InFlight: Boolean;       { a batch with this client is with the decider }
     constructor Create;
     destructor Destroy; override;
   end;
@@ -104,6 +110,37 @@ type
     Count: Integer;          { bans so far: bantime.increment }
     Active: Boolean;
     Reason: string;
+  end;
+
+  { one batch for the decider: the clients, what the model sees, the verdicts }
+  TDecideJob = class
+  public
+    Clients: TList;          { TClient, kept alive by InFlight }
+    Lines: TFPObjectList;    { per client, a TFPObjectList of its TPendingLine }
+    Items: TList;            { TJevItem, one per client }
+    Ok: Boolean;
+    Error: string;
+    Ms: Int64;
+    constructor Create;
+    destructor Destroy; override;
+  end;
+
+  { asks the decider on its own thread: jobs in, finished jobs out }
+  TDeciderWorker = class(TThread)
+  private
+    FDecider: TDecider;
+    FLock: TCriticalSection;
+    FTodo, FDone: TList;
+    FWake: TEventObject;
+  protected
+    procedure Execute; override;
+  public
+    constructor Create(ADecider: TDecider);
+    destructor Destroy; override;
+    procedure Submit(AJob: TDecideJob);
+    { a finished job, or nil }
+    function Collect: TDecideJob;
+    function Busy: Integer;
   end;
 
   TBanStats = record
@@ -130,6 +167,7 @@ type
     FLinesSinceFlush: Integer;
     FLastNow: Int64;
     FBad: TBadPaths;         { nil when badpaths = off }
+    FWorker: TDeciderWorker; { live daemon only }
     { --eval: strike decisions per labelled request, rules alone and the whole pipeline }
     FEvalRules, FEvalLive: TConfusion;
     FEvalAfterBan: array[CTruthBenign..CTruthAttack] of Int64;
@@ -149,6 +187,8 @@ type
     function IsBanned(const AIp: string): Boolean;
     procedure MaybeFlush(ANow: Int64);
     procedure Flush(ANow: Int64);
+    procedure ApplyJob(AJob: TDecideJob; ANow: Int64);
+    procedure CollectResults;
     procedure AddStrike(C: TClient; ANow: Int64; AInstant: Boolean; const AReason: string);
     procedure BanClient(C: TClient; const AReason: string);
     procedure Purge(ANow: Int64);
@@ -198,6 +238,129 @@ begin
   Pending.Free;
   Recent.Free;
   inherited Destroy;
+end;
+
+{ TDecideJob }
+
+constructor TDecideJob.Create;
+begin
+  inherited Create;
+  Clients := TList.Create;
+  Lines := TFPObjectList.Create(True);
+  Items := TList.Create;
+end;
+
+destructor TDecideJob.Destroy;
+var
+  I: Integer;
+begin
+  for I := 0 to Items.Count - 1 do
+    TJevItem(Items[I]).Free;
+  Items.Free;
+  Lines.Free;
+  Clients.Free;
+  inherited Destroy;
+end;
+
+{ TDeciderWorker }
+
+constructor TDeciderWorker.Create(ADecider: TDecider);
+begin
+  FDecider := ADecider;
+  FLock := TCriticalSection.Create;
+  FTodo := TList.Create;
+  FDone := TList.Create;
+  FWake := TEventObject.Create(nil, False, False, '');
+  inherited Create(False);
+end;
+
+destructor TDeciderWorker.Destroy;
+var
+  I: Integer;
+begin
+  Terminate;
+  FWake.SetEvent;
+  WaitFor;
+  for I := 0 to FTodo.Count - 1 do
+    TDecideJob(FTodo[I]).Free;
+  for I := 0 to FDone.Count - 1 do
+    TDecideJob(FDone[I]).Free;
+  FTodo.Free;
+  FDone.Free;
+  FWake.Free;
+  FLock.Free;
+  inherited Destroy;
+end;
+
+procedure TDeciderWorker.Execute;
+var
+  LJob: TDecideJob;
+begin
+  { the FPU mask is per thread, and ggml's kernels need the C default }
+  SetExceptionMask([exInvalidOp, exDenormalized, exZeroDivide, exOverflow, exUnderflow, exPrecision]);
+  while not Terminated do
+  begin
+    FLock.Enter;
+    try
+      if FTodo.Count > 0 then
+      begin
+        LJob := TDecideJob(FTodo[0]);
+        FTodo.Delete(0);
+      end
+      else
+        LJob := nil;
+    finally
+      FLock.Leave;
+    end;
+    if LJob = nil then
+    begin
+      FWake.WaitFor(500);
+      Continue;
+    end;
+    LJob.Ok := FDecider.Decide(LJob.Items, LJob.Error, LJob.Ms);
+    FLock.Enter;
+    try
+      FDone.Add(LJob);
+    finally
+      FLock.Leave;
+    end;
+  end;
+end;
+
+procedure TDeciderWorker.Submit(AJob: TDecideJob);
+begin
+  FLock.Enter;
+  try
+    FTodo.Add(AJob);
+  finally
+    FLock.Leave;
+  end;
+  FWake.SetEvent;
+end;
+
+function TDeciderWorker.Collect: TDecideJob;
+begin
+  Result := nil;
+  FLock.Enter;
+  try
+    if FDone.Count > 0 then
+    begin
+      Result := TDecideJob(FDone[0]);
+      FDone.Delete(0);
+    end;
+  finally
+    FLock.Leave;
+  end;
+end;
+
+function TDeciderWorker.Busy: Integer;
+begin
+  FLock.Enter;
+  try
+    Result := FTodo.Count;
+  finally
+    FLock.Leave;
+  end;
 end;
 
 { TBanEngine }
@@ -252,6 +415,7 @@ end;
 
 destructor TBanEngine.Destroy;
 begin
+  FWorker.Free;   { before the decider it uses }
   FLog.Free;
   FEvalClients.Free;
   FEvalCats.Free;
@@ -330,7 +494,8 @@ begin
   Sort(0, N - 1);
   LCutoff := LSeen[Min(ACount, N) - 1];
   for I := N - 1 downto 0 do
-    if (TClient(FClients.Objects[I]).LastSeen <= LCutoff) and not TClient(FClients.Objects[I]).Queued then
+    if (TClient(FClients.Objects[I]).LastSeen <= LCutoff) and not TClient(FClients.Objects[I]).Queued and
+       not TClient(FClients.Objects[I]).InFlight then
       FClients.Delete(I);
 end;
 
@@ -512,7 +677,7 @@ begin
     Decide(C, ASummary, ATags, AScore, ATruth, ACategory, -1, '', 'hard rule', ANow);
     Exit;
   end;
-  if (C.VerdictAt > 0) and (ANow - C.VerdictAt < FCfg.CacheSecs) and not C.Queued then
+  if (C.VerdictAt > 0) and (ANow - C.VerdictAt < FCfg.CacheSecs) and not C.Queued and not C.InFlight then
   begin
     Decide(C, ASummary, ATags, AScore, ATruth, ACategory, C.VerdictMal, C.VerdictIntent,
       FCfg.Mode + ' (cached)', ANow);
@@ -660,88 +825,131 @@ end;
 
 procedure TBanEngine.Flush(ANow: Int64);
 var
-  LClients, LItems: TList;
+  LJob: TDecideJob;
+  LItem: TJevItem;
+  C: TClient;
+  J: Integer;
+begin
+  while FQueue.Count > 0 do
+  begin
+    LJob := TDecideJob.Create;
+    while (FQueue.Count > 0) and (LJob.Clients.Count < FCfg.BatchClients) do
+    begin
+      C := TClient(FQueue[0]);
+      FQueue.Delete(0);
+      LJob.Clients.Add(C);
+      LItem := TJevItem.Create;
+      LItem.Ip := C.IpText;
+      LItem.Hits := C.PendingTags.CommaText;
+      { the model sees the latest flagged requests; all of them get its verdict }
+      for J := Max(0, C.Pending.Count - 2 * FCfg.ContextLines) to C.Pending.Count - 1 do
+        LItem.Flagged.Add(TPendingLine(C.Pending[J]).Summary);
+      for J := 0 to C.Recent.Count - 1 do
+        if LItem.Flagged.IndexOf(C.Recent[J]) < 0 then
+          LItem.Earlier.Add(C.Recent[J]);
+      LJob.Items.Add(LItem);
+      { the job takes the client's pending requests }
+      LJob.Lines.Add(C.Pending);
+      C.Pending := TFPObjectList.Create(True);
+      C.PendingTags.Clear;
+      C.Queued := False;
+    end;
+
+    if ANow div 60 <> FMinute then
+    begin
+      FMinute := ANow div 60;
+      FMinuteCalls := 0;
+    end;
+    if FMinuteCalls >= FCfg.MaxPerMinute then
+    begin
+      LJob.Error := 'rate limit';
+      ApplyJob(LJob, ANow);
+      Continue;
+    end;
+    Inc(FMinuteCalls);
+    Inc(Stats.DeciderCalls);
+    Inc(Stats.DeciderClients, LJob.Items.Count);
+    if FWorker <> nil then
+    begin
+      for J := 0 to LJob.Clients.Count - 1 do
+        TClient(LJob.Clients[J]).InFlight := True;
+      FWorker.Submit(LJob);
+    end
+    else
+    begin
+      LJob.Ok := FDecider.Decide(LJob.Items, LJob.Error, LJob.Ms);
+      ApplyJob(LJob, ANow);
+    end;
+  end;
+  FLinesSinceFlush := 0;
+end;
+
+procedure TBanEngine.ApplyJob(AJob: TDecideJob; ANow: Int64);
+var
   LItem: TJevItem;
   LLine: TPendingLine;
+  LLines: TFPObjectList;
   C: TClient;
   I, J: Integer;
-  LOk: Boolean;
-  LError, LHow: string;
-  LMs: Int64;
+  LHow: string;
 begin
-  LClients := TList.Create;
-  LItems := TList.Create;
   try
-    while FQueue.Count > 0 do
+    if AJob.Error = 'rate limit' then
+      LHow := 'rules (decider rate limit)'
+    else if AJob.Ok then
+      LHow := Format('%s batch of %d, %dms', [FCfg.Mode, AJob.Items.Count, AJob.Ms])
+    else
     begin
-      LClients.Clear;
-      for I := LItems.Count - 1 downto 0 do
-        TJevItem(LItems[I]).Free;
-      LItems.Clear;
-      while (FQueue.Count > 0) and (LClients.Count < FCfg.BatchClients) do
+      Inc(Stats.DeciderErrors);
+      Inc(FErrsSinceLog);
+      if UnixNow - FLastErrLog >= 60 then
       begin
-        C := TClient(FQueue[0]);
-        FQueue.Delete(0);
-        LClients.Add(C);
-        LItem := TJevItem.Create;
-        LItem.Ip := C.IpText;
-        LItem.Hits := C.PendingTags.CommaText;
-        { the model sees the latest flagged requests; all of them get its verdict }
-        for J := Max(0, C.Pending.Count - 2 * FCfg.ContextLines) to C.Pending.Count - 1 do
-          LItem.Flagged.Add(TPendingLine(C.Pending[J]).Summary);
-        for J := 0 to C.Recent.Count - 1 do
-          if LItem.Flagged.IndexOf(C.Recent[J]) < 0 then
-            LItem.Earlier.Add(C.Recent[J]);
-        LItems.Add(LItem);
+        Log(Format('decider error (%d since last report): %s', [FErrsSinceLog, AJob.Error]));
+        FLastErrLog := UnixNow;
+        FErrsSinceLog := 0;
       end;
-
-      if ANow div 60 <> FMinute then
-      begin
-        FMinute := ANow div 60;
-        FMinuteCalls := 0;
-      end;
-      LOk := False;
-      LError := '';
-      if FMinuteCalls >= FCfg.MaxPerMinute then
-      begin
-        LError := 'rate limit';
-        LHow := 'rules (decider rate limit)';
-      end
+      if FCfg.OnError = 'rules' then
+        LHow := 'rules (decider unavailable)'
       else
+        LHow := 'skipped (decider unavailable)';
+    end;
+
+    for I := 0 to AJob.Clients.Count - 1 do
+    begin
+      C := TClient(AJob.Clients[I]);
+      LItem := TJevItem(AJob.Items[I]);
+      LLines := TFPObjectList(AJob.Lines[I]);
+      C.InFlight := False;
+      if AJob.Ok then
       begin
-        Inc(FMinuteCalls);
-        Inc(Stats.DeciderCalls);
-        Inc(Stats.DeciderClients, LItems.Count);
-        LOk := FDecider.Decide(LItems, LError, LMs);
-        if LOk then
-          LHow := Format('%s batch of %d, %dms', [FCfg.Mode, LItems.Count, LMs])
+        C.VerdictAt := ANow;
+        C.VerdictMal := LItem.Malicious;
+        C.VerdictIntent := LItem.Intent;
+      end;
+      for J := 0 to LLines.Count - 1 do
+      begin
+        LLine := TPendingLine(LLines[J]);
+        if IsBanned(C.IpText) then
+        begin
+          if LLine.Truth <> CTruthUnknown then
+            Inc(FEvalAfterBan[LLine.Truth]);
+          Continue;
+        end;
+        if AJob.Ok then
+          Decide(C, LLine.Summary, LLine.Tags, LLine.Score, LLine.Truth, LLine.Category, LItem.Malicious,
+            LItem.Intent, LHow, ANow)
+        else if (AJob.Error = 'rate limit') or (FCfg.OnError = 'rules') then
+          Decide(C, LLine.Summary, LLine.Tags, LLine.Score, LLine.Truth, LLine.Category, -1, '', LHow, ANow)
         else
         begin
-          Inc(Stats.DeciderErrors);
-          Inc(FErrsSinceLog);
-          if UnixNow - FLastErrLog >= 60 then
-          begin
-            Log(Format('decider error (%d since last report): %s', [FErrsSinceLog, LError]));
-            FLastErrLog := UnixNow;
-            FErrsSinceLog := 0;
-          end;
-          if FCfg.OnError = 'rules' then
-            LHow := 'rules (decider unavailable)'
-          else
-            LHow := 'skipped (decider unavailable)';
+          CountEval(LLine.Truth, LLine.Category, LLine.Score >= FCfg.RulesMinScore, False);
+          if FCfg.Verbose or FCfg.TestMode then
+            Log(Format('%s pass [%s] via %s: %s', [C.IpText, LLine.Tags, LHow, Copy(LLine.Summary, 1, 300)]));
         end;
       end;
-
-      for I := 0 to LClients.Count - 1 do
+      { requests that came in while the batch was out: the fresh verdict covers them }
+      if AJob.Ok and C.Queued then
       begin
-        C := TClient(LClients[I]);
-        LItem := TJevItem(LItems[I]);
-        if LOk then
-        begin
-          C.VerdictAt := ANow;
-          C.VerdictMal := LItem.Malicious;
-          C.VerdictIntent := LItem.Intent;
-        end;
         for J := 0 to C.Pending.Count - 1 do
         begin
           LLine := TPendingLine(C.Pending[J]);
@@ -751,30 +959,31 @@ begin
               Inc(FEvalAfterBan[LLine.Truth]);
             Continue;
           end;
-          if LOk then
-            Decide(C, LLine.Summary, LLine.Tags, LLine.Score, LLine.Truth, LLine.Category, LItem.Malicious,
-              LItem.Intent, LHow, ANow)
-          else if (LError = 'rate limit') or (FCfg.OnError = 'rules') then
-            Decide(C, LLine.Summary, LLine.Tags, LLine.Score, LLine.Truth, LLine.Category, -1, '', LHow, ANow)
-          else
-          begin
-            CountEval(LLine.Truth, LLine.Category, LLine.Score >= FCfg.RulesMinScore, False);
-            if FCfg.Verbose or FCfg.TestMode then
-              Log(Format('%s pass [%s] via %s: %s', [C.IpText, LLine.Tags, LHow, Copy(LLine.Summary, 1, 300)]));
-          end;
+          Decide(C, LLine.Summary, LLine.Tags, LLine.Score, LLine.Truth, LLine.Category, LItem.Malicious,
+            LItem.Intent, FCfg.Mode + ' (verdict of the batch in flight)', ANow);
         end;
         C.Pending.Clear;
         C.PendingTags.Clear;
         C.Queued := False;
+        FQueue.Remove(C);
       end;
     end;
   finally
-    for I := 0 to LItems.Count - 1 do
-      TJevItem(LItems[I]).Free;
-    LItems.Free;
-    LClients.Free;
+    AJob.Free;
   end;
-  FLinesSinceFlush := 0;
+end;
+
+procedure TBanEngine.CollectResults;
+var
+  LJob: TDecideJob;
+begin
+  if FWorker = nil then
+    Exit;
+  repeat
+    LJob := FWorker.Collect;
+    if LJob <> nil then
+      ApplyJob(LJob, UnixNow);
+  until LJob = nil;
 end;
 
 procedure TBanEngine.InitDecider;
@@ -818,6 +1027,9 @@ begin
     on E: Exception do
       Log(Format('local model unavailable, the signatures decide instead: %s', [E.Message]));
   end;
+  { the live daemon asks on a worker thread; --test and --eval inline }
+  if (FDecider <> nil) and not FCfg.TestMode then
+    FWorker := TDeciderWorker.Create(FDecider);
 end;
 
 function TBanEngine.Describe: string;
@@ -1083,7 +1295,7 @@ begin
   for I := FClients.Count - 1 downto 0 do
   begin
     C := TClient(FClients.Objects[I]);
-    if (ANow - C.LastSeen > LIdle) and not C.Queued then
+    if (ANow - C.LastSeen > LIdle) and not C.Queued and not C.InFlight then
       FClients.Delete(I);
   end;
   { an expired ban is remembered for bantime.increment until maxtime passes }
@@ -1108,6 +1320,7 @@ begin
   if FCfg.TestMode then
     Exit;
   LNow := UnixNow;
+  CollectResults;
   MaybeFlush(LNow);
   for I := 0 to FBans.Count - 1 do
   begin
@@ -1269,7 +1482,14 @@ end;
 
 procedure TBanEngine.Stop;
 begin
-  FlushAll;
+  if FWorker <> nil then
+  begin
+    { a batch in progress stops between clients; what is still queued is dropped }
+    DeciderAbort := True;
+    FreeAndNil(FWorker);
+  end
+  else
+    FlushAll;
   SaveState;
   if FCfg.CleanupOnExit then
     FAction.Stop;
