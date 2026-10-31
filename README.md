@@ -407,9 +407,19 @@ and any of the four commands can be overridden in `[action]` with tags such as `
 - **Linux:** x86-64 with AVX2, glibc 2.35+ (Ubuntu 22.04, Debian 12, Fedora 36 and later); root
   or `CAP_NET_ADMIN` to change the firewall.
 - **Windows:** x64; an Administrator prompt for the Windows firewall.
-- **Logs:** Apache `common`, `combined` and `vhost_combined`, and nginx's default format, IPv4
-  and IPv6. Rotation by rename or copytruncate is followed. Behind a reverse proxy, log the real
-  client address (`mod_remoteip`).
+- **Logs:** detected per line, so one daemon can follow a mix:
+  - Apache `common`, `combined` and `vhost_combined`, and nginx's default `combined`;
+  - IIS W3C Extended (`u_ex*.log`), with any set of fields: the columns are read from each file's
+    `#Fields:` header, also when it changes mid-file or lies a gigabyte behind the point
+    jevban starts at;
+  - JSON, one object per line: nginx `log_format ... escape=json` with the usual variable names
+    (`remote_addr`, `request` or `request_method` + `request_uri`, `status`, `http_user_agent`,
+    `time_local` or `time_iso8601`), Caddy's access log and Traefik's JSON access log.
+
+  IPv4 and IPv6. Rotation by rename or copytruncate is followed; with a wildcard, files idle for
+  a day are let go (IIS keeps every daily log) and picked up where they were if written again.
+  Behind a reverse proxy, log the real client address (`mod_remoteip`, nginx `real_ip`, IIS
+  "X-Forwarded-For" as `c-ip` via the ARR helper).
 - **Memory:** about 1 GB more than the model file in local mode (~7 GB for Flash 9B); a few MB
   with a hosted API or rules only.
 - **Speed:** the parser, signatures and known-bad paths handle about 16,000 lines a second on

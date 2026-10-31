@@ -87,19 +87,20 @@ begin
   Engine.Log(Format('test run over %s, decider %s', [Tailer.FileNames, Engine.Describe]));
   while not Stopping and Tailer.Poll(Lines) do
   begin
-    for Line in Lines do
+    for I := 0 to Lines.Count - 1 do
     begin
       if Stopping then
         Break;
+      Line := Lines[I];
       if Cfg.EvalMode then
       begin
         if (Line = '') or (Line[1] = '#') then
           Continue;
         LText := SplitLabel(Line, LTruth, LCategory);
-        Engine.Feed(LText, LTruth, LCategory);
+        Engine.Feed(LText, LTruth, LCategory, Lines.Objects[I]);
       end
       else
-        Engine.Feed(Line);
+        Engine.Feed(Line, CTruthUnknown, '', Lines.Objects[I]);
     end;
     Lines.Clear;
   end;
@@ -127,6 +128,8 @@ begin
 end;
 
 procedure RunDaemon;
+var
+  I: Integer;
 begin
   LowerPriority;
   Engine.Start;
@@ -137,9 +140,9 @@ begin
   begin
     Lines.Clear;
     if Tailer.Poll(Lines) then
-      for Line in Lines do
+      for I := 0 to Lines.Count - 1 do
       begin
-        Engine.Feed(Line);
+        Engine.Feed(Lines[I], CTruthUnknown, '', Lines.Objects[I]);
         if Stopping then
           Break;
       end;

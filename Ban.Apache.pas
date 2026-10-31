@@ -41,6 +41,14 @@ function CompactSummary(const E: TAccessEntry; const AClientAgent: string; AMaxL
 function ApacheUnescape(const S: string): string;
 function UrlDecode(const S: string): string;
 function UnixNow: Int64;
+{ [10/Oct/2000:13:55:36 -0700] -> Unix seconds UTC; 0 if unparsable }
+function ParseApacheTime(const S: string): Int64;
+{ Unix seconds -> [10/Oct/2000:20:55:36 +0000], the TimeText every format fills in }
+function FormatApacheTime(AEpoch: Int64): string;
+{ escapes a raw value the way Apache logs "%r": \" \\ and \xhh for control and non-ASCII bytes }
+function ApacheEscape(const S: string): string;
+{ splits "METHOD target PROTOCOL" into E.Method, E.Target, E.Protocol and sets E.Decoded }
+procedure SplitRequest(var E: TAccessEntry);
 
 implementation
 
@@ -199,6 +207,30 @@ begin
   Result := Result - LOff;
 end;
 
+function FormatApacheTime(AEpoch: Int64): string;
+var
+  D: TDateTime;
+  Y, M, Dd, H, N, Sec, Ms: Word;
+begin
+  D := UnixToDateTime(AEpoch);
+  DecodeDateTime(D, Y, M, Dd, H, N, Sec, Ms);
+  Result := Format('[%.2d/%s/%.4d:%.2d:%.2d:%.2d +0000]', [Dd, CMonths[M], Y, H, N, Sec]);
+end;
+
+function ApacheEscape(const S: string): string;
+var
+  C: Char;
+begin
+  Result := '';
+  for C in S do
+    case C of
+      '"', '\': Result := Result + '\' + C;
+      #32..#33, #35..#91, #93..#126: Result := Result + C;
+    else
+      Result := Result + '\x' + LowerCase(IntToHex(Ord(C), 2));
+    end;
+end;
+
 function Unquote(const T: string): string;
 begin
   if (T <> '') and (T[1] = '"') then
@@ -211,7 +243,7 @@ function ParseAccessLine(const ALine: string; out E: TAccessEntry): Boolean;
 var
   LTokens: TStringList;
   LTok, LReq: string;
-  P, LTime, I, LSp: Integer;
+  P, LTime: Integer;
 begin
   Result := False;
   E := Default(TAccessEntry);
@@ -248,6 +280,15 @@ begin
   finally
     LTokens.Free;
   end;
+  SplitRequest(E);
+  Result := True;
+end;
+
+procedure SplitRequest(var E: TAccessEntry);
+var
+  LReq: string;
+  I, LSp: Integer;
+begin
   { METHOD target PROTOCOL; a malformed request keeps it all in Target }
   LReq := E.Request;
   LSp := Pos(' ', LReq);
@@ -268,7 +309,6 @@ begin
   else
     E.Target := LReq;
   E.Decoded := UrlDecode(UrlDecode(ApacheUnescape(E.Target)));
-  Result := True;
 end;
 
 function CompactSummary(const E: TAccessEntry; const AClientAgent: string; AMaxLen: Integer): string;
@@ -287,7 +327,7 @@ function EntrySummary(const E: TAccessEntry; AMaxLen: Integer): string;
 begin
   Result := Format('%s "%s" %d %d ua="%s"', [Copy(E.TimeText, 2, 20), E.Request, E.Status,
     E.Bytes, E.Agent]);
-  if E.Referer <> '-' then
+  if (E.Referer <> '-') and (E.Referer <> '') then
     Result := Result + Format(' ref="%s"', [E.Referer]);
   if Length(Result) > AMaxLen then
     Result := Copy(Result, 1, AMaxLen) + '...';

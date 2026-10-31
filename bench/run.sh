@@ -52,6 +52,8 @@ for kind in typical flood; do
   printf '{"kind": "%s", "lines": %d, "seconds": %.3f, "lines_per_second": %.0f, "peak_rss_kb": %d}\n' \
     "$kind" "$lines" "$secs" "$(echo "$lines / $secs" | bc -l)" "$peak" > "$OUT/throughput-$kind.json"
 done
+# the same requests as Apache, nginx JSON and IIS W3C: same decisions, parse speed of each
+python3 bench/formats.py "$OUT/.load/typical.log" "$OUT" > "$OUT/formats.txt"
 rm -rf "$OUT/.load"
 
 python3 bench/summarize.py "$OUT" | tee "$OUT/SUMMARY.md"
