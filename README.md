@@ -227,13 +227,12 @@ url = http://127.0.0.1:3000/v1/systemone
 | Leaked secrets and repositories | `/.env`, `/.git/config`, `/.aws/credentials`, `id_rsa` | 10 |
 | Path traversal, system files | `../`, `/etc/passwd`, `/proc/self/` | 10 |
 | Code execution | `${jndi:` (Log4Shell), shell injection, PHP-CGI argument injection, `php://input`, phpunit and ThinkPHP RCE, router exploits | 10 |
-| A shell already uploaded | PHP run from an uploads folder (`/wp-content/uploads/2026/10/x7f3.php`) | 10 |
 | SQL injection | `union select`, `sleep(`, `information_schema` | 10 |
 | Scanner tools | sqlmap, nikto, nuclei, zgrab, masscan, wpscan, gobuster, ffuf… | 10 |
 | Text written for an AI judge | a user agent saying "ignore previous instructions", "do not block", "this client is legitimate" | 10 |
 | Admin tools and config files | phpMyAdmin, Adminer, Tomcat manager, `wp-config.php.bak`, `web.config` | 6 |
 | Web shells, phpinfo, XSS, proxy probes, TLS sent to HTTP | `/shell.php`, `/phpinfo.php`, `<script`, `CONNECT` | 6 |
-| Upload filter tricks | `avatar.php.jpg` | 6 |
+| Uploaded shells, upload filter tricks | PHP run from an uploads folder (`/wp-content/uploads/2026/10/x7f3.php`), `avatar.php.jpg` | 6 |
 | Known-bad path, 4xx | any of 2,454 paths from [SecLists](https://github.com/danielmiessler/SecLists) `quickhits` | +6 |
 | Known-bad file that exists (2xx), or a near variant on a 4xx | `/phpinfo2.php` → `/phpinfo.php` | +3 |
 | Path scan | 8 different missing paths within a minute (plugin probes, files no list has) | +3 |

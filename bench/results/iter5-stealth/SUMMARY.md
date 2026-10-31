@@ -43,5 +43,5 @@
 
 | log | lines | lines/s | peak RSS |
 |---|---|---|---|
-| flood | 100000 | 4967 | 51 MB |
-| typical | 200000 | 36158 | 10 MB |
+| flood | 100000 | 5290 | 51 MB |
+| typical | 200000 | 38953 | 10 MB |

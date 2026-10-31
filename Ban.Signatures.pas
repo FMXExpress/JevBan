@@ -80,8 +80,10 @@ begin
   AddRule(6, sfUrl, 'webshell', '/(shell|cmd|c99|r57|wso|alfa|b374k|indoxploit|xleet|leaf|' +
     'mini|up|uploader|webshell|bypass|0x|404|wp-sx|ws)\.php');
   (* PHP running from a folder that only ever holds what visitors uploaded: a
-     shell that is already on the box, under a random name no list knows *)
-  AddRule(10, sfUrl, 'php-in-uploads', '/(uploads?|avatars?|attachments?|tmp)/([^?]*/)?[^/?]*' +
+     shell that is already on the box, under a random name no list knows.
+     Weight 6, not 10: a badly built plugin may really run PHP from uploads/,
+     so the model gets the last word until real logs say otherwise *)
+  AddRule(6, sfUrl, 'php-in-uploads', '/(uploads?|avatars?|attachments?|tmp)/([^?]*/)?[^/?]*' +
     '\.(php\d?|phtml|phar|pht)([/?]|$)');
   { an image name with a PHP extension inside: an upload filter being tricked }
   AddRule(6, sfUrl, 'double-extension', '\.(php\d?|phtml|phar|pht)\.(jpe?g|png|gif|webp|bmp|ico|txt)([/?]|$)');

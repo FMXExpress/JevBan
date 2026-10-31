@@ -20,9 +20,13 @@ checker's dead `/press-kit.zip` drew a strike (benign request precision went bac
 `probe_files = 2` caught one more stealth client on the dev splits; kept at 3, because a site
 that moved off PHP gets visitors on old `.php` links and there are no real logs to test that.
 
-**Uploaded shells.** PHP run from an uploads, avatars, attachments or tmp folder is weight 10
+**Uploaded shells.** PHP run from an uploads, avatars, attachments or tmp folder is weight 6, so the model decides (a badly built plugin may really run PHP
+from uploads/; no real logs yet to rule that out)
 (`php-in-uploads`); `name.php.jpg` is weight 6 (`double-extension`). Before, a shell already
 on the box under a random name scored nothing.
 
 Stealth scanners: 0/3 → 1–2/3 on WordPress dev and static; still 0/3 on app and WordPress test
 (they make only 2–6 file probes in all).
+
+Prefilter throughput in a flood (every line a new address) fell from about 6,000 to about
+5,000 lines/s; typical traffic is unchanged at about 36,000. Not yet profiled.
