@@ -91,6 +91,7 @@ type
     LastSeen: Int64;
     FloodStart: Int64;
     FloodCount: Integer;
+    LoggedIn: Boolean;       { a login POST was answered with a redirect: it signed in }
     ScanStart: Int64;        { distinct 404 paths in the scan window }
     ScanPaths: TStringList;
     VerdictAt: Int64;        { 0 = no verdict yet }
@@ -191,6 +192,7 @@ type
     FBad: TBadPaths;         { nil when badpaths = off }
     FWorker: TDeciderWorker; { live daemon only }
     FLongHits: TStringList;  { address -> TLongHits }
+    FStrikeCap: Integer;     { strikes one verdict may still give; -1 = no limit }
     FNets: TStringList;      { subnet -> TNetHeat }
     { --eval: strike decisions per labelled request, rules alone and the whole pipeline }
     FEvalRules, FEvalLive: TConfusion;
@@ -444,6 +446,7 @@ begin
   FEvalCats.Sorted := True;
   FEvalCats.OwnsObjects := True;
   FEvalStart := Now;
+  FStrikeCap := -1;
   FAction := TBanAction.Create(@Log);
   FAction.Kind := FCfg.ActionType;
   FAction.Name := FCfg.ActionName;
@@ -654,6 +657,21 @@ begin
   try
     LTags.Duplicates := dupIgnore;
     LScore := FSigs.Score(E, LTags);
+    (* a signed-in user's own admin pages are not a probe. Login forms answer a
+       failed attempt with the form again (200) and a successful one with a
+       redirect (WordPress: 302 to /wp-admin/): a password guesser collects 200s,
+       the site's owner gets a 302. After that, the site-dependent login and CMS
+       tags (weight 3) stop counting for this client; hard rules still do *)
+    if C.LoggedIn then
+      for I := LTags.Count - 1 downto 0 do
+        if (LTags[I] = 'wordpress') or (LTags[I] = 'login-probe') then
+        begin
+          Dec(LScore, 3);
+          LTags.Delete(I);
+        end;
+    if (E.Method = 'POST') and (E.Status >= 301) and (E.Status <= 303) and
+       ((Pos('login', LowerCase(E.Decoded)) > 0) or (Pos('signin', LowerCase(E.Decoded)) > 0)) then
+      C.LoggedIn := True;
     if FBad <> nil then
     begin
       { a known-bad path: a probe when it is not there, the decider's call when it is }
@@ -896,6 +914,14 @@ begin
   begin
     LStrike := LModelStrike;
     LInstant := LModelInstant;
+    (* one verdict covers all the requests of a batch, but counts as at most
+       maxretry - 1 strikes: a ban below instant_threshold needs at least two
+       looks. A site owner judged on its first login requests is not banned by
+       that one look *)
+    if LStrike and not LInstant and (FStrikeCap = 0) then
+      LStrike := False
+    else if LStrike and (FStrikeCap > 0) then
+      Dec(FStrikeCap);
   end;
   CountEval(ATruth, ACategory, LRulesStrike, LStrike);
 
@@ -1054,6 +1080,7 @@ begin
         Inc(C.JudgedCount, LLines.Count);
         C.SinceVerdict := 0;
       end;
+      FStrikeCap := Max(1, FCfg.MaxRetry - 1);
       for J := 0 to LLines.Count - 1 do
       begin
         LLine := TPendingLine(LLines[J]);
@@ -1095,6 +1122,7 @@ begin
         C.Queued := False;
         FQueue.Remove(C);
       end;
+      FStrikeCap := -1;
     end;
   finally
     AJob.Free;
