@@ -35,6 +35,7 @@ type
   TJevItem = class
   public
     Ip: string;
+    Agent: string;            { the client's usual user agent }
     Hits: string;
     Flagged: TStringList;     { the requests that tripped a signature }
     Earlier: TStringList;     { the client's other recent requests, oldest first }
@@ -153,6 +154,7 @@ begin
     begin
       LItem := TJevItem(AItems[I]);
       LClient := TJSONObject.Create;
+      LClient.Add('user_agent', LItem.Agent);
       LClient.Add('signature_hits', LItem.Hits);
       LClient.Add('flagged_requests', StringsToJson(LItem.Flagged));
       LClient.Add('other_recent_requests', StringsToJson(LItem.Earlier));

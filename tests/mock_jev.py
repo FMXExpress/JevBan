@@ -2,8 +2,11 @@
 request and response shapes (batched: one noul question per client). It
 "decides" with a keyword check on each client's signature hits, so jevban can
 be run end to end without a GPU. Usage: mock_jev.py [port]"""
-import json, re, sys
+import json, os, re, sys, time
 from http.server import BaseHTTPRequestHandler, HTTPServer
+
+# MOCK_DELAY=seconds per client: stand in for a slow model (bench/live.py)
+DELAY = float(os.environ.get("MOCK_DELAY", "0"))
 
 BAD = ("env-file", "vcs-dir", "traversal", "log4shell", "sqli", "php-rce", "scanner-agent",
        "binary-request", "config-file")
@@ -12,6 +15,7 @@ class H(BaseHTTPRequestHandler):
     def do_POST(self):
         req = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
         clients = req["state"]["clients"]
+        time.sleep(DELAY * len(clients))
         answers = {}
         for key, q in req["questions"].items():
             ip = re.search(r"client (\S+) \(state", q["instructions"]).group(1)

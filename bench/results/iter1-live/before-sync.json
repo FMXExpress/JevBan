@@ -1,0 +1,18 @@
+{
+  "decider": "http://127.0.0.1:3010/v1/systemone",
+  "scanner_seconds_to_ban": 57.2,
+  "scanner_requests_before_ban": 30,
+  "scanner_probes": 30,
+  "guessers": 6,
+  "guessers_banned": 0,
+  "guesser_seconds_to_ban": [],
+  "guesser_seconds_to_verdict": [
+    64.1,
+    64.1,
+    64.1,
+    64.1,
+    64.1,
+    64.1
+  ],
+  "wall_seconds": 64.8
+}

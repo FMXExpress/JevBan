@@ -53,6 +53,10 @@ type
     function Prompt(const AState, AInstructions: string; const AOptions: array of string): string;
     function StateJson(AItem: TJevItem): string;
   public
+    { profile: prompts read, their tokens, and the time llama.cpp spent on them }
+    Prompts: Int64;
+    PromptTokens: Int64;
+    PromptMs: Int64;
     Site: string;
     Question: string;
     AskIntent: Boolean;
@@ -260,7 +264,10 @@ begin
   FVocab := llama_model_get_vocab(FModel);
   FNVocab := llama_vocab_n_tokens(FVocab);
   if AThreads <= 0 then
-    AThreads := Max(1, CpuCount - 1);
+    { every core: the model runs on its own thread while the daemon's loop mostly
+      sleeps; 4 threads instead of 3 was 1.45x faster on a 4-core machine. The
+      daemon runs niced (nice =), so the web server keeps priority }
+    AThreads := CpuCount;
   FNCtx := ANCtx;
   FNBatch := 512;
   CP := llama_context_default_params();
@@ -349,8 +356,10 @@ var
   LAt, LN, I: Integer;
   LLogits: PSingle;
   LMax, LSum: Double;
+  LStart: TDateTime;
 begin
   Result := nil;
+  LStart := Now;
   LTokens := Tokenize(APrompt, True);
   if Length(LTokens) >= FNCtx then
     raise Exception.CreateFmt('prompt of %d tokens does not fit the %d-token context', [Length(LTokens), FNCtx]);
@@ -381,11 +390,17 @@ begin
   end;
   for I := 0 to ANOptions - 1 do
     Result[I] := Result[I] / LSum;
+  Inc(Prompts);
+  Inc(PromptTokens, Length(LTokens));
+  Inc(PromptMs, MilliSecondsBetween(Now, LStart));
+  if GetEnvironmentVariable('JEVBAN_PROFILE') = '1' then
+    WriteLn(StdErr, Format('[profile] prompt %d tokens, %d ms', [Length(LTokens), MilliSecondsBetween(Now, LStart)]));
 end;
 
 function TLocalJudge.StateJson(AItem: TJevItem): string;
 begin
   Result := '{"server": ' + PyJsonStr(Site) + ', "client_ip": ' + PyJsonStr(AItem.Ip) +
+    ', "user_agent": ' + PyJsonStr(AItem.Agent) +
     ', "signature_hits": ' + PyJsonStr(AItem.Hits) +
     ', "flagged_requests": ' + PyJsonList(AItem.Flagged) +
     ', "other_recent_requests": ' + PyJsonList(AItem.Earlier) + '}';

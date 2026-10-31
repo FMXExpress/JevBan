@@ -1,0 +1,326 @@
+{
+  "decider" : "rules",
+  "shadow" : false,
+  "lines" : 1489,
+  "requests" : {
+    "rules" : {
+      "tp" : 103,
+      "fp" : 0,
+      "fn" : 135,
+      "tn" : 888,
+      "precision" : 1.0000000000000000E+000,
+      "recall" : 4.3277310924369750E-001
+    },
+    "live" : {
+      "tp" : 103,
+      "fp" : 0,
+      "fn" : 135,
+      "tn" : 888,
+      "precision" : 1.0000000000000000E+000,
+      "recall" : 4.3277310924369750E-001
+    }
+  },
+  "after_ban" : {
+    "attack" : 363,
+    "benign" : 0
+  },
+  "clients" : {
+    "attack" : 52,
+    "attack_banned" : 43,
+    "benign" : 72,
+    "benign_banned" : 0,
+    "leaked_attack_requests" : 238,
+    "leaked_per_banned_attacker_median" : 3.0000000000000000E+000,
+    "seconds_to_ban_median" : 3.0000000000000000E+000
+  },
+  "categories" : {
+    "attack:credential" : {
+      "clients" : 3,
+      "banned" : 0,
+      "rules" : {
+        "tp" : 0,
+        "fp" : 0,
+        "fn" : 51,
+        "tn" : 0,
+        "precision" : -1.0000000000000000E+000,
+        "recall" : 0.0000000000000000E+000
+      },
+      "live" : {
+        "tp" : 0,
+        "fp" : 0,
+        "fn" : 51,
+        "tn" : 0,
+        "precision" : -1.0000000000000000E+000,
+        "recall" : 0.0000000000000000E+000
+      }
+    },
+    "attack:distributed" : {
+      "clients" : 16,
+      "banned" : 16,
+      "rules" : {
+        "tp" : 17,
+        "fp" : 0,
+        "fn" : 0,
+        "tn" : 0,
+        "precision" : 1.0000000000000000E+000,
+        "recall" : 1.0000000000000000E+000
+      },
+      "live" : {
+        "tp" : 17,
+        "fp" : 0,
+        "fn" : 0,
+        "tn" : 0,
+        "precision" : 1.0000000000000000E+000,
+        "recall" : 1.0000000000000000E+000
+      }
+    },
+    "attack:evasion" : {
+      "clients" : 4,
+      "banned" : 4,
+      "rules" : {
+        "tp" : 12,
+        "fp" : 0,
+        "fn" : 0,
+        "tn" : 0,
+        "precision" : 1.0000000000000000E+000,
+        "recall" : 1.0000000000000000E+000
+      },
+      "live" : {
+        "tp" : 12,
+        "fp" : 0,
+        "fn" : 0,
+        "tn" : 0,
+        "precision" : 1.0000000000000000E+000,
+        "recall" : 1.0000000000000000E+000
+      }
+    },
+    "attack:exploit" : {
+      "clients" : 6,
+      "banned" : 3,
+      "rules" : {
+        "tp" : 10,
+        "fp" : 0,
+        "fn" : 0,
+        "tn" : 0,
+        "precision" : 1.0000000000000000E+000,
+        "recall" : 1.0000000000000000E+000
+      },
+      "live" : {
+        "tp" : 10,
+        "fp" : 0,
+        "fn" : 0,
+        "tn" : 0,
+        "precision" : 1.0000000000000000E+000,
+        "recall" : 1.0000000000000000E+000
+      }
+    },
+    "attack:injection" : {
+      "clients" : 2,
+      "banned" : 2,
+      "rules" : {
+        "tp" : 6,
+        "fp" : 0,
+        "fn" : 0,
+        "tn" : 0,
+        "precision" : 1.0000000000000000E+000,
+        "recall" : 1.0000000000000000E+000
+      },
+      "live" : {
+        "tp" : 6,
+        "fp" : 0,
+        "fn" : 0,
+        "tn" : 0,
+        "precision" : 1.0000000000000000E+000,
+        "recall" : 1.0000000000000000E+000
+      }
+    },
+    "attack:slow" : {
+      "clients" : 2,
+      "banned" : 2,
+      "rules" : {
+        "tp" : 10,
+        "fp" : 0,
+        "fn" : 0,
+        "tn" : 0,
+        "precision" : 1.0000000000000000E+000,
+        "recall" : 1.0000000000000000E+000
+      },
+      "live" : {
+        "tp" : 10,
+        "fp" : 0,
+        "fn" : 0,
+        "tn" : 0,
+        "precision" : 1.0000000000000000E+000,
+        "recall" : 1.0000000000000000E+000
+      }
+    },
+    "attack:stealth" : {
+      "clients" : 3,
+      "banned" : 0,
+      "rules" : {
+        "tp" : 0,
+        "fp" : 0,
+        "fn" : 43,
+        "tn" : 0,
+        "precision" : -1.0000000000000000E+000,
+        "recall" : 0.0000000000000000E+000
+      },
+      "live" : {
+        "tp" : 0,
+        "fp" : 0,
+        "fn" : 43,
+        "tn" : 0,
+        "precision" : -1.0000000000000000E+000,
+        "recall" : 0.0000000000000000E+000
+      }
+    },
+    "attack:variant" : {
+      "clients" : 5,
+      "banned" : 5,
+      "rules" : {
+        "tp" : 15,
+        "fp" : 0,
+        "fn" : 20,
+        "tn" : 0,
+        "precision" : 1.0000000000000000E+000,
+        "recall" : 4.2857142857142855E-001
+      },
+      "live" : {
+        "tp" : 15,
+        "fp" : 0,
+        "fn" : 20,
+        "tn" : 0,
+        "precision" : 1.0000000000000000E+000,
+        "recall" : 4.2857142857142855E-001
+      }
+    },
+    "attack:wordlist" : {
+      "clients" : 8,
+      "banned" : 8,
+      "rules" : {
+        "tp" : 24,
+        "fp" : 0,
+        "fn" : 0,
+        "tn" : 0,
+        "precision" : 1.0000000000000000E+000,
+        "recall" : 1.0000000000000000E+000
+      },
+      "live" : {
+        "tp" : 24,
+        "fp" : 0,
+        "fn" : 0,
+        "tn" : 0,
+        "precision" : 1.0000000000000000E+000,
+        "recall" : 1.0000000000000000E+000
+      }
+    },
+    "attack:wp-plugins" : {
+      "clients" : 3,
+      "banned" : 3,
+      "rules" : {
+        "tp" : 9,
+        "fp" : 0,
+        "fn" : 21,
+        "tn" : 0,
+        "precision" : 1.0000000000000000E+000,
+        "recall" : 2.9999999999999999E-001
+      },
+      "live" : {
+        "tp" : 9,
+        "fp" : 0,
+        "fn" : 21,
+        "tn" : 0,
+        "precision" : 1.0000000000000000E+000,
+        "recall" : 2.9999999999999999E-001
+      }
+    },
+    "benign:crawler" : {
+      "clients" : 8,
+      "banned" : 0,
+      "rules" : {
+        "tp" : 0,
+        "fp" : 0,
+        "fn" : 0,
+        "tn" : 116,
+        "precision" : -1.0000000000000000E+000,
+        "recall" : -1.0000000000000000E+000
+      },
+      "live" : {
+        "tp" : 0,
+        "fp" : 0,
+        "fn" : 0,
+        "tn" : 116,
+        "precision" : -1.0000000000000000E+000,
+        "recall" : -1.0000000000000000E+000
+      }
+    },
+    "benign:linkchecker" : {
+      "clients" : 2,
+      "banned" : 0,
+      "rules" : {
+        "tp" : 0,
+        "fp" : 0,
+        "fn" : 0,
+        "tn" : 38,
+        "precision" : -1.0000000000000000E+000,
+        "recall" : -1.0000000000000000E+000
+      },
+      "live" : {
+        "tp" : 0,
+        "fp" : 0,
+        "fn" : 0,
+        "tn" : 38,
+        "precision" : -1.0000000000000000E+000,
+        "recall" : -1.0000000000000000E+000
+      }
+    },
+    "benign:monitor" : {
+      "clients" : 2,
+      "banned" : 0,
+      "rules" : {
+        "tp" : 0,
+        "fp" : 0,
+        "fn" : 0,
+        "tn" : 46,
+        "precision" : -1.0000000000000000E+000,
+        "recall" : -1.0000000000000000E+000
+      },
+      "live" : {
+        "tp" : 0,
+        "fp" : 0,
+        "fn" : 0,
+        "tn" : 46,
+        "precision" : -1.0000000000000000E+000,
+        "recall" : -1.0000000000000000E+000
+      }
+    },
+    "benign:visitor" : {
+      "clients" : 60,
+      "banned" : 0,
+      "rules" : {
+        "tp" : 0,
+        "fp" : 0,
+        "fn" : 0,
+        "tn" : 688,
+        "precision" : -1.0000000000000000E+000,
+        "recall" : -1.0000000000000000E+000
+      },
+      "live" : {
+        "tp" : 0,
+        "fp" : 0,
+        "fn" : 0,
+        "tn" : 688,
+        "precision" : -1.0000000000000000E+000,
+        "recall" : -1.0000000000000000E+000
+      }
+    }
+  },
+  "model" : {
+    "hard_rule_decisions" : 0,
+    "requests" : 0,
+    "clients" : 0,
+    "errors" : 0,
+    "reviews" : 0,
+    "wall_seconds" : 1.5900009311735630E-001
+  }
+}

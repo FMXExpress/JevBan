@@ -34,6 +34,10 @@ type
 function ParseAccessLine(const ALine: string; out E: TAccessEntry): Boolean;
 { one line for a model or a log: time, request, status, size, agent }
 function EntrySummary(const E: TAccessEntry; AMaxLen: Integer = 400): string;
+(* the request as the decider sees it: time of day, request, status, size, and the
+   referer and user agent only when they say something (the client's usual user
+   agent is stated once for the client, not on every line) *)
+function CompactSummary(const E: TAccessEntry; const AClientAgent: string; AMaxLen: Integer = 300): string;
 function ApacheUnescape(const S: string): string;
 function UrlDecode(const S: string): string;
 function UnixNow: Int64;
@@ -265,6 +269,18 @@ begin
     E.Target := LReq;
   E.Decoded := UrlDecode(UrlDecode(ApacheUnescape(E.Target)));
   Result := True;
+end;
+
+function CompactSummary(const E: TAccessEntry; const AClientAgent: string; AMaxLen: Integer): string;
+begin
+  { [10/Oct/2000:13:55:36 -0700] -> 13:55:36 }
+  Result := Format('%s %s %d %d', [Copy(E.TimeText, 14, 8), E.Request, E.Status, E.Bytes]);
+  if (E.Referer <> '-') and (E.Referer <> '') then
+    Result := Result + Format(' ref="%s"', [E.Referer]);
+  if E.Agent <> AClientAgent then
+    Result := Result + Format(' ua="%s"', [E.Agent]);
+  if Length(Result) > AMaxLen then
+    Result := Copy(Result, 1, AMaxLen) + '...';
 end;
 
 function EntrySummary(const E: TAccessEntry; AMaxLen: Integer): string;

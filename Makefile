@@ -27,8 +27,9 @@ llama:
 	cmake -S llama.cpp -B llama.cpp/build -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=ON \
 	  -DLLAMA_CURL=OFF -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_EXAMPLES=OFF -DLLAMA_BUILD_SERVER=OFF \
 	  -DLLAMA_BUILD_TOOLS=OFF -DCMAKE_BUILD_WITH_INSTALL_RPATH=ON '-DCMAKE_INSTALL_RPATH=$$ORIGIN' \
-	  -DGGML_OPENMP=OFF $(LLAMA_CMAKE)
-	cmake --build llama.cpp/build -j --target llama
+	  -DGGML_OPENMP=OFF -DGGML_BACKEND_DL=ON -DGGML_CPU_ALL_VARIANTS=ON $(LLAMA_CMAKE)
+	cmake --build llama.cpp/build -j --target llama \
+	  $$(cmake --build llama.cpp/build --target help | grep -oE 'ggml-cpu-[a-z0-9]+' | grep -v feats | sort -u)
 	@mkdir -p $(BUILD)
 	cp -a llama.cpp/build/bin/lib*.so* $(BUILD)/
 

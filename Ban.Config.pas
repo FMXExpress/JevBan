@@ -30,13 +30,20 @@ type
     BanTime: Int64;
     BanIncrement: Boolean;    { each repeat ban lasts twice as long ... }
     BanMax: Int64;            { ... up to this }
+    LongRetry: Integer;       { hard-rule strikes within LongTime that ban a slow scanner; 0 = off }
+    LongTime: Int64;
+    SubnetRetry: Integer;     { addresses of one /24 (/64) with hard-rule strikes within findtime
+                                that make the subnet hot; 0 = off }
     ContextLines: Integer;    { recent requests per client kept for the model }
     MaxClients: Integer;
     Flood4xx: Integer;        { this many 4xx in findtime is suspicious too; 0 = off }
+    Scan404: Integer;         { this many distinct 404 paths within ScanWindow: a path scan; 0 = off }
+    ScanWindow: Integer;
     SignatureFile: string;
     BuiltinSignatures: Boolean;
     SuspiciousScore: Integer; { prefilter score that sends a request to the decider }
     Verbose: Boolean;
+    Nice: Integer;            { the daemon's scheduling niceness (Unix), below-normal priority on Windows if > 0 }
     { [decider] }
     Mode: string;             { local (OpenJev in-process) | jev (a /v1/systemone server) | rules }
     LocalModel: string;       { flash-9b, flash-9b-q8, 27b, ... or a .gguf path }
@@ -54,6 +61,7 @@ type
     Threshold: Double;        { P(malicious) that counts as a strike }
     InstantThreshold: Double; { P(malicious) that bans at once }
     CacheSecs: Integer;       { reuse a client's verdict this long }
+    CachePassSecs: Integer;   { ... and a pass this long, while the client does nothing new }
     BatchInterval: Integer;   { flush the queue of flagged clients after this many seconds ... }
     BatchLines: Integer;      { ... or this many log lines ... }
     BatchClients: Integer;    { ... or when this many clients are queued (one request each flush) }
@@ -79,6 +87,7 @@ type
     { command line only }
     TestMode: Boolean;
     EvalMode: Boolean;        { --eval: TestMode on a labelled log }
+    EvalJson: string;         { --eval-json: the eval counts as JSON too }
     ListBans: Boolean;
     constructor Create;
     destructor Destroy; override;
@@ -152,6 +161,7 @@ begin
   WriteLn('  -t, --test FILE        read FILE once, print each decision, ban nothing (like fail2ban-regex)');
   WriteLn('      --eval FILE        replay a labelled log ("attack<TAB>line" / "benign<TAB>line") and count');
   WriteLn('                         the strike decisions of the signatures and of the live pipeline');
+  WriteLn('      --eval-json FILE   write the --eval counts to FILE as JSON too');
   WriteLn('      --shadow           ask the model and log its verdicts, but let the signatures ban');
   WriteLn('  -n, --dry-run          log the firewall commands instead of running them');
   WriteLn('  -m, --mode MODE        local (OpenJev in-process, the default) | jev (a /v1/systemone server)');
@@ -161,7 +171,7 @@ begin
   WriteLn('  -p, --provider NAME    ask a hosted decision API (implies --mode jev; key in api_key or the');
   WriteLn('                         provider''s variable): ' + ProviderNames);
   WriteLn('  -u, --jev-url URL      ask this /v1/systemone server instead (implies --mode jev)');
-  WriteLn('  -a, --action TYPE      iptables | nftables | ufw | firewalld | fail2ban | netsh | command | none');
+  WriteLn('  -a, --action TYPE      iptables | ipset | nftables | ufw | firewalld | fail2ban | netsh | command | none');
   WriteLn('  -b, --batch SECONDS    queue flagged clients and ask the decider about them in one request');
   WriteLn('                         every SECONDS (also every batch_lines lines / batch_clients clients)');
   WriteLn('      --list             print the bans in the state file and exit');
@@ -189,11 +199,17 @@ begin
   BanTime := 3600;
   BanIncrement := True;
   BanMax := 7 * 86400;
+  LongRetry := 5;
+  LongTime := 86400;
+  SubnetRetry := 3;
   ContextLines := 6;
   MaxClients := 20000;
   Flood4xx := 40;
+  Scan404 := 8;
+  ScanWindow := 60;
   BuiltinSignatures := True;
   SuspiciousScore := 3;
+  Nice := 10;
   Mode := 'local';
   LocalModel := 'flash-9b';
   {$IFDEF WINDOWS}
@@ -215,6 +231,7 @@ begin
   Threshold := 0.80;
   InstantThreshold := 0.97;
   CacheSecs := 60;
+  CachePassSecs := 1800;
   BatchInterval := 5;
   BatchLines := 1000;
   BatchClients := 8;
@@ -340,6 +357,8 @@ begin
         TestMode := True;
         EvalMode := True;
       end
+      else if LArg = '--eval-json' then
+        EvalJson := NextVal
       else if LArg = '--shadow' then
         LCli.Values['shadow'] := '1'
       else if LArg = '--list' then
@@ -377,13 +396,19 @@ begin
       BanTime := LIni.ReadInt64('jevban', 'bantime', BanTime);
       BanIncrement := LIni.ReadBool('jevban', 'bantime.increment', BanIncrement);
       BanMax := LIni.ReadInt64('jevban', 'bantime.maxtime', BanMax);
+      LongRetry := LIni.ReadInteger('jevban', 'longretry', LongRetry);
+      LongTime := LIni.ReadInt64('jevban', 'longtime', LongTime);
+      SubnetRetry := LIni.ReadInteger('jevban', 'subnet_retry', SubnetRetry);
       ContextLines := LIni.ReadInteger('jevban', 'context_lines', ContextLines);
       MaxClients := LIni.ReadInteger('jevban', 'max_clients', MaxClients);
       Flood4xx := LIni.ReadInteger('jevban', 'flood_4xx', Flood4xx);
+      Scan404 := LIni.ReadInteger('jevban', 'scan_404', Scan404);
+      ScanWindow := LIni.ReadInteger('jevban', 'scan_window', ScanWindow);
       SignatureFile := LIni.ReadString('jevban', 'signatures', SignatureFile);
       BuiltinSignatures := LIni.ReadBool('jevban', 'builtin_signatures', BuiltinSignatures);
       SuspiciousScore := LIni.ReadInteger('jevban', 'suspicious_score', SuspiciousScore);
       Verbose := LIni.ReadBool('jevban', 'verbose', Verbose);
+      Nice := LIni.ReadInteger('jevban', 'nice', Nice);
 
       Mode := LowerCase(LIni.ReadString('decider', 'mode', Mode));
       Provider := LowerCase(Trim(LIni.ReadString('decider', 'provider', '')));
@@ -409,6 +434,7 @@ begin
       Threshold := F('threshold', Threshold);
       InstantThreshold := F('instant_threshold', InstantThreshold);
       CacheSecs := LIni.ReadInteger('decider', 'cache_secs', CacheSecs);
+      CachePassSecs := LIni.ReadInteger('decider', 'cache_pass_secs', CachePassSecs);
       BatchInterval := LIni.ReadInteger('decider', 'batch_interval', BatchInterval);
       BatchLines := LIni.ReadInteger('decider', 'batch_lines', BatchLines);
       BatchClients := LIni.ReadInteger('decider', 'batch_clients', BatchClients);

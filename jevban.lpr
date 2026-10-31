@@ -11,6 +11,7 @@ program jevban;
 
 uses
   {$IFDEF UNIX}cthreads, BaseUnix,{$ENDIF}
+  {$IFDEF WINDOWS}Windows,{$ENDIF}
   SysUtils, Classes,
   Ban.Config, Ban.Tail, Ban.Engine, Ban.Jev;
 
@@ -46,18 +47,25 @@ begin
 end;
 {$ENDIF}
 
-{ --eval lines: "attack<TAB>log line" or "benign<TAB>log line" }
-function SplitLabel(const ALine: string; out ATruth: Integer): string;
+{ --eval lines: "attack[:category]<TAB>log line" or "benign[:category]<TAB>log line" }
+function SplitLabel(const ALine: string; out ATruth: Integer; out ACategory: string): string;
 var
-  LTab: Integer;
+  LTab, LColon: Integer;
   LLabel: string;
 begin
   ATruth := CTruthUnknown;
+  ACategory := '';
   Result := ALine;
   LTab := Pos(#9, ALine);
   if LTab = 0 then
     Exit;
   LLabel := LowerCase(Trim(Copy(ALine, 1, LTab - 1)));
+  LColon := Pos(':', LLabel);
+  if LColon > 0 then
+  begin
+    ACategory := Copy(LLabel, 1, LColon - 1) + ':' + Copy(LLabel, LColon + 1, MaxInt);
+    LLabel := Copy(LLabel, 1, LColon - 1);
+  end;
   if LLabel = 'attack' then
     ATruth := CTruthAttack
   else if LLabel = 'benign' then
@@ -70,7 +78,7 @@ end;
 procedure RunTest;
 var
   I, LTruth: Integer;
-  LText: string;
+  LText, LCategory: string;
 begin
   for I := 0 to Cfg.LogPaths.Count - 1 do
     if not FileExists(Cfg.LogPaths[I]) then
@@ -87,8 +95,8 @@ begin
       begin
         if (Line = '') or (Line[1] = '#') then
           Continue;
-        LText := SplitLabel(Line, LTruth);
-        Engine.Feed(LText, LTruth);
+        LText := SplitLabel(Line, LTruth, LCategory);
+        Engine.Feed(LText, LTruth, LCategory);
       end
       else
         Engine.Feed(Line);
@@ -98,11 +106,29 @@ begin
   Engine.FlushAll;
   Engine.Log(Engine.Summary);
   if Cfg.EvalMode then
-    Engine.EvalReport;
+    Engine.EvalReport(Cfg.EvalJson);
+end;
+
+{ the model may use every core; the web server should still come first }
+procedure LowerPriority;
+begin
+  if Cfg.Nice <= 0 then
+    Exit;
+  {$IFDEF UNIX}
+  { setpriority, not FpNice: x86-64 Linux has no nice syscall, and FPC 3.2.2's
+    FpNice fails there with EINVAL. Threads started later (the decider worker,
+    llama.cpp's pool) inherit it }
+  if FpSetPriority(0, 0, Cfg.Nice) <> 0 then
+    WriteLn(StdErr, 'jevban: could not lower the priority (errno ', FpGetErrno, ')');
+  {$ENDIF}
+  {$IFDEF WINDOWS}
+  SetPriorityClass(GetCurrentProcess, BELOW_NORMAL_PRIORITY_CLASS);
+  {$ENDIF}
 end;
 
 procedure RunDaemon;
 begin
+  LowerPriority;
   Engine.Start;
   Engine.InitDecider;
   Engine.Log(Format('following %s; decider %s; action %s%s', [Tailer.FileNames, Engine.Describe, Cfg.ActionType,
