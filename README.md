@@ -442,8 +442,8 @@ and any of the four commands can be overridden in `[action]` with tags such as `
   200,000 lines a second with typical traffic and about 35,000–60,000 in a flood where every
   line is a new address, the same with 20,000 or 500,000 clients tracked. Signature and
   near-miss results are cached per distinct URL, user agent and path (bounded), so repeated
-  traffic costs a lookup. IIS logs run at about 55,000 lines a second and JSON logs at about
-  20,000 (a full JSON parse per line).
+  traffic costs a lookup. IIS logs run at about 130,000 lines a second and JSON logs at about
+  95,000.
 - **Ban storms:** firewall commands run on their own thread, and bans queued meanwhile go to
   the firewall together: one `ipset restore`, `nft -f` or `iptables-restore` per batch. 2,000
   addresses banned at once were all in the firewall within 0.2 s, with the log read without a

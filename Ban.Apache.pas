@@ -191,7 +191,23 @@ begin
   Result := Result - LOff;
 end;
 
+threadvar
+  GLastFmtEpoch: Int64;
+  GLastFmtText: string;
+
+function FormatApacheTimeUncached(AEpoch: Int64): string; forward;
+
 function FormatApacheTime(AEpoch: Int64): string;
+begin
+  { lines come in time order: most share the previous line's second }
+  if (GLastFmtText <> '') and (AEpoch = GLastFmtEpoch) then
+    Exit(GLastFmtText);
+  Result := FormatApacheTimeUncached(AEpoch);
+  GLastFmtEpoch := AEpoch;
+  GLastFmtText := Result;
+end;
+
+function FormatApacheTimeUncached(AEpoch: Int64): string;
 var
   D: TDateTime;
   Y, M, Dd, H, N, Sec, Ms: Word;
@@ -202,17 +218,45 @@ begin
 end;
 
 function ApacheEscape(const S: string): string;
+const
+  CHex: array[0..15] of Char = '0123456789abcdef';
 var
+  I, N: Integer;
   C: Char;
 begin
-  Result := '';
-  for C in S do
+  { nearly always nothing to escape: the string itself, no copy }
+  I := 1;
+  while (I <= Length(S)) and (S[I] in [#32..#33, #35..#91, #93..#126]) do
+    Inc(I);
+  if I > Length(S) then
+    Exit(S);
+  { at most four characters for one: write in place, trim at the end }
+  SetLength(Result, Length(S) * 4);
+  N := 0;
+  for I := 1 to Length(S) do
+  begin
+    C := S[I];
     case C of
-      '"', '\': Result := Result + '\' + C;
-      #32..#33, #35..#91, #93..#126: Result := Result + C;
+      '"', '\':
+        begin
+          Result[N + 1] := '\';
+          Result[N + 2] := C;
+          Inc(N, 2);
+        end;
+      #32..#33, #35..#91, #93..#126:
+        begin
+          Result[N + 1] := C;
+          Inc(N);
+        end;
     else
-      Result := Result + '\x' + LowerCase(IntToHex(Ord(C), 2));
+      Result[N + 1] := '\';
+      Result[N + 2] := 'x';
+      Result[N + 3] := CHex[Ord(C) shr 4];
+      Result[N + 4] := CHex[Ord(C) and 15];
+      Inc(N, 4);
     end;
+  end;
+  SetLength(Result, N);
 end;
 
 type
