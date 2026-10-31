@@ -14,5 +14,11 @@ login looks like its API traffic), and one to three exploit or variant probers p
 Still missed by everything: `stealth` (0/3 per split), scanners whose probes sit between
 ordinary page views on paths no list knows.
 
-Request-level recall in the model runs counts only the requests the eval scored before each
-ban, so it is not comparable with the rules-only column; compare clients.
+Attack requests that reached the server (rules / rules + model): WordPress 212 / 182, static
+238 / 180, app 233 / 240. The median log-seconds to a ban go from 3 to 5, because the model
+decides in batches. On the app split the extra bans came late enough that slightly more requests
+leaked; that is the cost to cut next (verdict latency, not accuracy).
+
+The request-level recall column in SUMMARY.md excludes requests that arrive after a client is
+banned (`after_ban`), so it is not comparable between runs that ban different clients; compare
+clients and leaked requests.
