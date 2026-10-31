@@ -39,6 +39,8 @@ type
     Flood4xx: Integer;        { this many 4xx in findtime is suspicious too; 0 = off }
     Scan404: Integer;         { this many distinct 404 paths within ScanWindow: a path scan; 0 = off }
     ScanWindow: Integer;
+    ProbeFiles: Integer;      { this many distinct 4xx code, config or backup files within ProbeWindow: a strike; 0 = off }
+    ProbeWindow: Integer;
     SignatureFile: string;
     BuiltinSignatures: Boolean;
     SuspiciousScore: Integer; { prefilter score that sends a request to the decider }
@@ -207,6 +209,8 @@ begin
   Flood4xx := 40;
   Scan404 := 8;
   ScanWindow := 60;
+  ProbeFiles := 3;
+  ProbeWindow := 3600;
   BuiltinSignatures := True;
   SuspiciousScore := 3;
   Nice := 10;
@@ -404,6 +408,8 @@ begin
       Flood4xx := LIni.ReadInteger('jevban', 'flood_4xx', Flood4xx);
       Scan404 := LIni.ReadInteger('jevban', 'scan_404', Scan404);
       ScanWindow := LIni.ReadInteger('jevban', 'scan_window', ScanWindow);
+      ProbeFiles := LIni.ReadInteger('jevban', 'probe_files', ProbeFiles);
+      ProbeWindow := LIni.ReadInteger('jevban', 'probe_window', ProbeWindow);
       SignatureFile := LIni.ReadString('jevban', 'signatures', SignatureFile);
       BuiltinSignatures := LIni.ReadBool('jevban', 'builtin_signatures', BuiltinSignatures);
       SuspiciousScore := LIni.ReadInteger('jevban', 'suspicious_score', SuspiciousScore);

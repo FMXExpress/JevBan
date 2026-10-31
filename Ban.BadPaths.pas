@@ -55,8 +55,60 @@ function NormalizePath(const ADecoded: string): string;
 function FuzzAllowance(ALen: Integer): Integer;
 { Levenshtein distance, giving up (AMax + 1) once it must exceed AMax }
 function BoundedLevenshtein(const A, B: string; AMax: Integer): Integer;
+(* a normalized path that asks for code, configuration, data or a backup by name
+   (archives are left out: a dead download link is common, and backup-named
+   archives are the backup-file signature's)
+   (/old/db.sql, /Admin.asp, /config.json, /.npmrc): what a scanner asks for and a
+   visitor's broken link almost never is. On the LogarX shop every one of the 130
+   benign 4xx had no extension; the attacks' 4xx had 1,100 of these *)
+function IsFileProbe(const APath: string): Boolean;
 
 implementation
+
+const
+  CProbeExts: array[0..64] of string = (
+    'php', 'php3', 'php4', 'php5', 'php7', 'phtml', 'inc', 'asp', 'aspx', 'ashx', 'asmx',
+    'axd', 'cfm', 'cgi', 'pl', 'py', 'rb', 'jsp', 'jspx', 'do', 'action', 'sh', 'bash',
+    'exe', 'dll', 'bat', 'cmd', 'ps1', 'vb', 'cs', 'java', 'config', 'conf', 'cfg', 'ini',
+    'env', 'yml', 'yaml', 'toml', 'properties', 'json', 'txt', 'sql', 'db', 'sqlite',
+    'sqlite3', 'mdb', 'bak', 'old', 'orig', 'save', 'swp', 'tmp', 'temp', 'backup', 'bk',
+    'log', 'war', 'jar', 'key', 'pem',
+    'p12', 'pfx', 'lock', 'dist');
+  (* names a browser, crawler or monitor asks for whether or not the site has them *)
+  CWellKnown: array[0..8] of string = (
+    'robots.txt', 'ads.txt', 'app-ads.txt', 'humans.txt', 'security.txt', 'llms.txt',
+    'manifest.json', 'sellers.json', 'index.php');
+
+function IsFileProbe(const APath: string): Boolean;
+var
+  P, I: Integer;
+  LName, LExt: string;
+begin
+  Result := False;
+  if Pos('/.well-known/', APath + '/') = 1 then
+    Exit;
+  P := Length(APath);
+  while (P > 0) and (APath[P] <> '/') do
+    Dec(P);
+  LName := Copy(APath, P + 1, MaxInt);
+  if LName = '' then
+    Exit;
+  for I := Low(CWellKnown) to High(CWellKnown) do
+    if LName = CWellKnown[I] then
+      Exit;
+  { a dotfile (/.env, /.git/config's directory is caught by the bad-path list) }
+  if (LName[1] = '.') and (Length(LName) > 1) and (Pos('.', Copy(LName, 2, MaxInt)) = 0) then
+    Exit(True);
+  P := Length(LName);
+  while (P > 1) and (LName[P] <> '.') do
+    Dec(P);
+  if P <= 1 then
+    Exit;
+  LExt := Copy(LName, P + 1, MaxInt);
+  for I := Low(CProbeExts) to High(CProbeExts) do
+    if LExt = CProbeExts[I] then
+      Exit(True);
+end;
 
 function NormalizePath(const ADecoded: string): string;
 var
