@@ -171,7 +171,7 @@ begin
   WriteLn('  -p, --provider NAME    ask a hosted decision API (implies --mode jev; key in api_key or the');
   WriteLn('                         provider''s variable): ' + ProviderNames);
   WriteLn('  -u, --jev-url URL      ask this /v1/systemone server instead (implies --mode jev)');
-  WriteLn('  -a, --action TYPE      iptables | nftables | ufw | firewalld | fail2ban | netsh | command | none');
+  WriteLn('  -a, --action TYPE      iptables | ipset | nftables | ufw | firewalld | fail2ban | netsh | command | none');
   WriteLn('  -b, --batch SECONDS    queue flagged clients and ask the decider about them in one request');
   WriteLn('                         every SECONDS (also every batch_lines lines / batch_clients clients)');
   WriteLn('      --list             print the bans in the state file and exit');

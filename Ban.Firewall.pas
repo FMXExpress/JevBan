@@ -84,6 +84,19 @@ begin
     LBan := '<iptables> -I <name> 1 -s <ip> -j DROP';
     LUnban := '<iptables> -D <name> -s <ip> -j DROP';
   end
+  else if Kind = 'ipset' then
+  begin
+    { iptables with the bans in a hash set: one rule however many addresses, where
+      the iptables preset adds a rule per address (checked one by one per packet) }
+    LStart := 'ipset create <name><v6suffix> hash:ip <ipsetfamily> -exist && ipset flush <name><v6suffix> && ' +
+      '{ <iptables> -C INPUT -p tcp -m multiport --dports <port> -m set --match-set <name><v6suffix> src -j DROP ' +
+      '2>/dev/null || <iptables> -I INPUT -p tcp -m multiport --dports <port> -m set --match-set <name><v6suffix> ' +
+      'src -j DROP; }';
+    LStop := '<iptables> -D INPUT -p tcp -m multiport --dports <port> -m set --match-set <name><v6suffix> src ' +
+      '-j DROP; ipset destroy <name><v6suffix>';
+    LBan := 'ipset add <name><v6suffix> <ip> -exist';
+    LUnban := 'ipset del <name><v6suffix> <ip> -exist';
+  end
   else if Kind = 'nftables' then
   begin
     LStart := 'nft add table inet <name> && ' +
@@ -119,7 +132,7 @@ begin
     LUnban := 'netsh advfirewall firewall delete rule name="<name> <ip>"';
   end
   else if (Kind <> 'none') and (Kind <> 'command') then
-    raise Exception.CreateFmt('unknown action type "%s" (iptables, nftables, ufw, firewalld, ' +
+    raise Exception.CreateFmt('unknown action type "%s" (iptables, ipset, nftables, ufw, firewalld, ' +
       'fail2ban, netsh, command, none)', [Kind]);
   { the config's own commands win over the preset }
   if StartCmd = '' then
@@ -147,9 +160,11 @@ begin
       Result := StringReplace(Result, '<family>', 'inet', [rfReplaceAll]);
       Result := StringReplace(Result, '<fwfamily>', 'ipv4', [rfReplaceAll]);
       Result := StringReplace(Result, '<iptables>', 'iptables', [rfReplaceAll]);
+      Result := StringReplace(Result, '<v6suffix>', '', [rfReplaceAll]);
     end
     else
     begin
+      Result := StringReplace(Result, '<v6suffix>', '6', [rfReplaceAll]);
       Result := StringReplace(Result, '<v>', '6', [rfReplaceAll]);
       Result := StringReplace(Result, '<family>', 'inet6', [rfReplaceAll]);
       Result := StringReplace(Result, '<fwfamily>', 'ipv6', [rfReplaceAll]);
@@ -157,7 +172,20 @@ begin
     end;
   end
   else
+  begin
     Result := StringReplace(Result, '<iptables>', AIptables, [rfReplaceAll]);
+    { start/stop run once per family: the IPv6 set is <name>6 }
+    if AIptables = 'ip6tables' then
+    begin
+      Result := StringReplace(Result, '<v6suffix>', '6', [rfReplaceAll]);
+      Result := StringReplace(Result, '<ipsetfamily>', 'family inet6', [rfReplaceAll]);
+    end
+    else
+    begin
+      Result := StringReplace(Result, '<v6suffix>', '', [rfReplaceAll]);
+      Result := StringReplace(Result, '<ipsetfamily>', 'family inet', [rfReplaceAll]);
+    end;
+  end;
   Result := StringReplace(Result, '<name>', Name, [rfReplaceAll]);
   Result := StringReplace(Result, '<port>', Port, [rfReplaceAll]);
   Result := StringReplace(Result, '<jail>', Jail, [rfReplaceAll]);

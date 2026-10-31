@@ -229,14 +229,28 @@ url = http://127.0.0.1:3000/v1/systemone
 | Code execution | `${jndi:` (Log4Shell), shell injection, phpunit and ThinkPHP RCE, router exploits | 10 |
 | SQL injection | `union select`, `sleep(`, `information_schema` | 10 |
 | Scanner tools | sqlmap, nikto, nuclei, zgrab, masscan, wpscan, gobuster, ffuf… | 10 |
+| Text written for an AI judge | a user agent saying "ignore previous instructions", "do not block", "this client is legitimate" | 10 |
 | Admin tools and config files | phpMyAdmin, Adminer, Tomcat manager, `wp-config.php.bak`, `web.config` | 6 |
 | Web shells, phpinfo, XSS, proxy probes, TLS sent to HTTP | `/shell.php`, `/phpinfo.php`, `<script`, `CONNECT` | 6 |
 | Known-bad path, 4xx | any of 2,454 paths from [SecLists](https://github.com/danielmiessler/SecLists) `quickhits` | +6 |
-| Known-bad path that exists (2xx), or a near variant on a 4xx | `/phpinfo2.php` → `/phpinfo.php` | +3 |
+| Known-bad file that exists (2xx), or a near variant on a 4xx | `/phpinfo2.php` → `/phpinfo.php` | +3 |
+| Path scan | 8 different missing paths within a minute (plugin probes, files no list has) | +3 |
 | Site-dependent | WordPress and VPN logins, `/cgi-bin/`, script user agents, backups, 4xx bursts | 3 |
 
 Weight 10 is never legitimate and bans without asking the model; 6 is almost always a probe;
-3 depends on your site and is left to the model. Add your own rules in a file:
+3 depends on your site and is left to the model.
+
+Some attackers are only visible over time, so jevban also watches behaviour:
+
+- **Slow scanners** send one probe every 15–40 minutes, too slowly for `maxretry` within
+  `findtime`. Probes (score 6 or more) are remembered per address for `longtime` (24 hours);
+  `longretry` (5) of them ban.
+- **Scans spread over many addresses** send two probes from each of 16 addresses in one /24.
+  Once `subnet_retry` (3) addresses of a /24 (IPv6 /64) have probed within `findtime`, those
+  addresses, and any other address of that subnet that probes, are banned. Only addresses that
+  probed are banned, never the whole subnet, which may be a NAT or a mobile carrier.
+
+Add your own rules in a file:
 
 ```
 # signatures = /etc/jevban/extra.rules
@@ -270,6 +284,35 @@ separate from the site's owner, whom it let through. This set is synthetic; labe
 your own traffic and run `--eval` before relying on the numbers.
 
 Model verdicts between 0.5 and the strike threshold are logged as `REVIEW` for you to audit.
+
+## Benchmark
+
+`bench/run.sh` measures quality and speed; every change to the detection is checked against it,
+and benign clients banned must not go up.
+
+- **Synthetic corpora** (`bench/gen_corpus.py`): three site types (a WordPress blog, a static
+  site, a web app with an API and an admin panel), each with a dev split to tune on and a
+  held-out test split to report on. The benign traffic includes what trips cheap checks (API
+  clients with script user agents, link checkers, SEO crawlers, monitors, the owner logging
+  in); the attacks include what dodges them (path variants, encodings, slow scanners, scans
+  spread over a subnet, scanners hiding between page views, prompt-injecting user agents).
+- **Real traffic**: the [LogarX/Zodiarc](https://github.com/FRTX045/LogarX-Dataset) labelled
+  shop log (63,000 lines of real Apache output, real tools, a label on every line), downloaded
+  at benchmark time and checksum-pinned (`bench/fetch_logarx.py`).
+- **Live**: `bench/live.py` measures wall-clock time to a ban with the daemon tailing a log
+  written in real time.
+
+Signatures and behaviour rules alone (no model), held-out test splits and LogarX:
+
+| | Benign clients banned | Attackers banned | Attack requests that reached the server |
+|---|---|---|---|
+| WordPress test | 0 of 73 | 44 of 51 | 212 |
+| Static site test | 0 of 72 | 43 of 52 | 238 |
+| Web app test | 0 of 79 | 41 of 51 | 233 |
+| LogarX (real) | 0 of 789 | 124 of 126 | 564 |
+
+The attackers the rules still miss are the ones that look like ordinary use (password
+guessing, plugin probing, stealthy scanning between page views); those are the model's job.
 
 ## Configuration
 
@@ -329,6 +372,7 @@ jevban [options]
 | `type` | How a ban is applied |
 |---|---|
 | `iptables` (Linux default) | A `jevban` chain hooked into INPUT for the web ports; IPv6 through `ip6tables` |
+| `ipset` | iptables with the bans in a hash set (IPv4 `jevban`, IPv6 `jevban6`) behind one rule: use it when bans run into the thousands |
 | `nftables` | A `jevban` table with IPv4 and IPv6 address sets |
 | `ufw` | `ufw prepend deny from <ip> to any port <port>` |
 | `firewalld` | A runtime rich rule |
@@ -336,6 +380,12 @@ jevban [options]
 | `netsh` (Windows default) | A Windows Firewall block rule |
 | `command` | Your own `actionban` / `actionunban` commands |
 | `none` | Log only |
+
+The `iptables`, `ipset` and `nftables` presets have been tested for real: ban, unban on expiry,
+and cleanup on stop, for IPv4 and IPv6. The `iptables` preset adds one rule per address, which
+the kernel checks one by one for every packet, and adding a ban gets slower too (50 bans took
+191 ms with no bans in place, 419 ms with 20,000); `ipset` and `nftables` keep the addresses in
+a hash set, where both stay flat.
 
 Actions follow fail2ban's lifecycle (`actionstart`, `actionban`, `actionunban`, `actionstop`),
 and any of the four commands can be overridden in `[action]` with tags such as `<ip>`,
