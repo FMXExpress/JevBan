@@ -8,7 +8,7 @@ program jevban_test;
 
 uses
   SysUtils, Classes, Math, fpjson, jsonparser,
-  Ban.Net, Ban.Apache, Ban.Signatures, Ban.Jev, Ban.Local, Ban.Config, Ban.BadPaths;
+  Ban.Net, Ban.Apache, Ban.Signatures, Ban.Jev, Ban.Local, Ban.Config, Ban.BadPaths, Ban.LogFormats;
 
 var
   Failures: Integer = 0;
@@ -107,6 +107,58 @@ begin
   Check(not ParseAccessLine('garbage', E), 'garbage');
   Check(not ParseAccessLine('not-an-ip - - [31/Oct/2026:10:00:11 +0000] "GET / HTTP/1.1" 200 1', E), 'hostname client');
   Check(not ParseAccessLine('', E), 'empty');
+end;
+
+procedure TestLogFormats;
+var
+  E: TAccessEntry;
+  L: TW3CLayout;
+begin
+  { IIS default fields, no header seen: recognised by the leading date }
+  Check(ParseLogLine('2026-10-31 10:00:03 10.0.0.5 GET /index.aspx id=1''+or+1=1 443 - 2001:db8::9 ' +
+    'Mozilla/5.0+(X11;+Linux) https://x/ 404 0 2 15', nil, E), 'iis default fields');
+  Check((E.IpText = '2001:db8::9') and (E.Method = 'GET') and (E.Target = '/index.aspx?id=1''+or+1=1') and
+    (E.Status = 404) and (E.Agent = 'Mozilla/5.0 (X11; Linux)') and (E.Referer = 'https://x/'), 'iis default values');
+  Check(E.Decoded = '/index.aspx?id=1'' or 1=1', 'iis query decoded');
+  Check(E.Epoch = 1793440803, 'iis time is UTC');
+  Check(E.TimeText = '[31/Oct/2026:10:00:03 +0000]', 'iis time text');
+  { a custom header }
+  L := TW3CLayout.Create('#Fields: date time c-ip cs-method cs-uri-stem cs-uri-query cs-version sc-status sc-bytes cs-host');
+  try
+    Check(ParseLogLine('2026-10-31 10:00:03 203.0.113.4 POST /x.php - HTTP/2 200 512 example.com', L, E) and
+      (E.Request = 'POST /x.php HTTP/2') and (E.Bytes = 512) and (E.VHost = 'example.com') and (E.Agent = ''),
+      'iis custom fields');
+    Check(not ParseLogLine('2026-10-31 10:00:03 203.0.113.4 POST /x.php', L, E), 'iis short line');
+  finally
+    L.Free;
+  end;
+  Check(IsW3CFieldsLine('#Fields: date time') and not IsW3CFieldsLine('#Date: 2026-10-31'), 'fields line');
+  { nginx escape=json }
+  Check(ParseLogLine('{"time_local":"31/Oct/2026:10:00:03 +0000","remote_addr":"203.0.113.5",' +
+    '"request":"GET /a?b=%2e%2e HTTP/1.1","status":"404","body_bytes_sent":"9","http_referer":"",' +
+    '"http_user_agent":"x \"y\" \u0001"}', nil, E), 'nginx json');
+  Check((E.IpText = '203.0.113.5') and (E.Status = 404) and (E.Bytes = 9) and (E.Epoch = 1793440803) and
+    (E.Decoded = '/a?b=..') and (E.Agent = 'x \"y\" \x01'), 'nginx json values, escaped');
+  { parts instead of the request line; ISO time with an offset }
+  Check(ParseLogLine('{"time_iso8601":"2026-10-31T12:00:03+02:00","remote_addr":"198.51.100.1",' +
+    '"request_method":"HEAD","uri":"/p","args":"q=1","status":200}', nil, E) and
+    (E.Request = 'HEAD /p?q=1') and (E.Epoch = 1793440803), 'json parts, iso offset');
+  { Caddy }
+  Check(ParseLogLine('{"ts":1793440803.5,"request":{"client_ip":"203.0.113.6","proto":"HTTP/2.0","method":"GET",' +
+    '"host":"e.com","uri":"/.env","headers":{"User-Agent":["curl/8"]}},"status":404,"size":0}', nil, E) and
+    (E.IpText = '203.0.113.6') and (E.Target = '/.env') and (E.Agent = 'curl/8') and (E.Epoch = 1793440803),
+    'caddy json');
+  { Traefik: address with a port }
+  Check(ParseLogLine('{"ClientAddr":"[2001:db8::7]:5123","DownstreamStatus":403,"RequestMethod":"GET",' +
+    '"RequestPath":"/x","RequestProtocol":"HTTP/1.1","StartUTC":"2026-10-31T10:00:03.1Z"}', nil, E) and
+    (E.IpText = '2001:db8::7') and (E.Status = 403) and (E.Epoch = 1793440803), 'traefik json');
+  Check(not ParseLogLine('{"msg":"no request here"}', nil, E), 'json without a request');
+  Check(not ParseLogLine('{broken', nil, E), 'broken json');
+  { Apache still goes to the Apache parser }
+  Check(ParseLogLine('192.0.2.1 - - [31/Oct/2026:10:00:03 +0000] "GET / HTTP/1.1" 200 1', nil, E) and
+    (E.Epoch = 1793440803), 'apache via the dispatcher');
+  Check((ParseIsoTime('2026-10-31T10:00:03Z') = 1793440803) and (ParseIsoTime('2026-10-31 10:00:03') = 1793440803) and
+    (ParseIsoTime('2026-10-31T05:30:03-0430') = 1793440803) and (ParseIsoTime('nope') = 0), 'iso time');
 end;
 
 procedure TestSignatures;
@@ -358,6 +410,7 @@ begin
   TestProviders;
   TestLocal;
   TestApache;
+  TestLogFormats;
   TestSignatures;
   TestSignatureFile;
   TestJev;

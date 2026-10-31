@@ -12,6 +12,8 @@ import sys
 def load(d):
     runs = {}
     for f in sorted(glob.glob(os.path.join(d, '*.json'))):
+        if os.path.basename(f) == 'formats.json':
+            continue
         with open(f) as fh:
             runs[os.path.basename(f)[:-5]] = json.load(fh)
     return runs
@@ -54,6 +56,15 @@ def main():
     for name, r in runs.items():
         if name.startswith('throughput'):
             print('| %s | %d | %.0f | %.0f MB |' % (r['kind'], r['lines'], r['lines_per_second'], r['peak_rss_kb'] / 1024))
+    fpath = os.path.join(sys.argv[1], 'formats.json')
+    formats = json.load(open(fpath)) if os.path.exists(fpath) else None
+    if formats:
+        print('\n## Log formats: the same requests as Apache, nginx JSON and IIS W3C\n')
+        print('| format | lines/s | suspicious | strikes | bans |')
+        print('|---|---|---|---|---|')
+        for kind, r in formats.items():
+            print('| %s | %d | %s | %s | %s |' % (kind, r['lines_per_second'], r.get('suspicious'), r.get('strikes'),
+                                               r.get('bans')))
 
 
 if __name__ == '__main__':

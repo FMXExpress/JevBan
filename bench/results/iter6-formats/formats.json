@@ -1,0 +1,26 @@
+{
+  "apache": {
+    "lines": 200000,
+    "lines_per_second": 20293,
+    "parsed": 200000,
+    "suspicious": 2785,
+    "strikes": 1640,
+    "bans": 1630
+  },
+  "json": {
+    "lines": 200000,
+    "lines_per_second": 11611,
+    "parsed": 200000,
+    "suspicious": 2785,
+    "strikes": 1640,
+    "bans": 1630
+  },
+  "iis": {
+    "lines": 200003,
+    "lines_per_second": 20075,
+    "parsed": 200000,
+    "suspicious": 2785,
+    "strikes": 1640,
+    "bans": 1630
+  }
+}

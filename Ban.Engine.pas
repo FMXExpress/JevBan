@@ -39,7 +39,7 @@ interface
 
 uses
   SysUtils, Classes, Math, Contnrs, SyncObjs, fpjson, jsonparser,
-  Ban.Net, Ban.Apache, Ban.Signatures, Ban.BadPaths, Ban.Jev, Ban.Local, Ban.Firewall, Ban.Config;
+  Ban.Net, Ban.Apache, Ban.LogFormats, Ban.Signatures, Ban.BadPaths, Ban.Jev, Ban.Local, Ban.Firewall, Ban.Config;
 
 const
   { --eval labels }
@@ -239,7 +239,9 @@ type
     { state, actionstop when cleanup_on_exit }
     procedure Stop;
     { ATruth: a --eval label (CTruth*) }
-    procedure Feed(const ALine: string; ATruth: Integer = CTruthUnknown; const ACategory: string = '');
+    { ALayout: the line's W3C (IIS) columns from the tailer, or nil }
+    procedure Feed(const ALine: string; ATruth: Integer = CTruthUnknown; const ACategory: string = '';
+      ALayout: TObject = nil);
     { --eval: the counts against the labels; AJsonFile <> '': also as JSON }
     procedure EvalReport(const AJsonFile: string = '');
     { unbans the expired, forgets idle clients, saves the state }
@@ -590,7 +592,7 @@ begin
   FClients.AddObject(E.IpText, Result);
 end;
 
-procedure TBanEngine.Feed(const ALine: string; ATruth: Integer; const ACategory: string);
+procedure TBanEngine.Feed(const ALine: string; ATruth: Integer; const ACategory: string; ALayout: TObject);
 var
   E: TAccessEntry;
   C: TClient;
@@ -600,8 +602,11 @@ var
   LSummary, LModelLine, LPath, LNear: string;
   LEval: TEvalClient;
 begin
+  { W3C directives (#Software, #Date, #Version); #Fields is the tailer's }
+  if (ALine <> '') and (ALine[1] = '#') then
+    Exit;
   Inc(Stats.Lines);
-  if not ParseAccessLine(ALine, E) then
+  if not ParseLogLine(ALine, TW3CLayout(ALayout), E) then
   begin
     if FCfg.Verbose then
       Log('unparsed: ' + Copy(ALine, 1, 200));

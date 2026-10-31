@@ -7,14 +7,18 @@ unit Ban.Tail;
      - rename + create: the path now names another file (inode on Unix);
        the old file is drained to its end first, then the new one is read
        from the start;
-     - copytruncate: the file got shorter than our position; start over. *)
+     - copytruncate: the file got shorter than our position; start over.
+   IIS (W3C) logs name their columns in "#Fields:" header lines; each file
+   keeps its latest header and hands it out with every line it returns (the
+   line's Objects[] entry), so files with different columns can be followed
+   together. Opening at the end, the last header before it is looked up. *)
 
 {$mode objfpc}{$H+}
 
 interface
 
 uses
-  SysUtils, Classes {$IFDEF UNIX}, BaseUnix{$ENDIF};
+  SysUtils, Classes, StrUtils, Contnrs, Ban.LogFormats {$IFDEF UNIX}, BaseUnix{$ENDIF};
 
 type
   TTailFile = class
@@ -25,6 +29,8 @@ type
     Ino: QWord;
     Partial: string;
     Seen: Boolean;      { still matched by a pattern on the last expansion }
+    Layout: TW3CLayout; { the latest "#Fields:" header, nil if none }
+    Layouts: TFPObjectList; { owns every layout handed out since the last Poll }
     constructor Create(const APath: string);
     destructor Destroy; override;
     function Open(AFromEnd: Boolean): Boolean;
@@ -32,12 +38,20 @@ type
     { appends whole lines to ALines; False when nothing new }
     function ReadNew(ALines: TStrings; AMaxBytes: Integer): Boolean;
     procedure CheckRotation;
+    procedure SetLayout(const AFieldsLine: string);
+    { forgets layouts that only lines already handed out (and processed) used }
+    procedure Prune;
+    (* the last "#Fields:" line before AEnd, '' if none. IIS writes one at the
+       top of each file, so on a big file this reads it all, backwards, once
+       at startup: about a second per GB from the page cache *)
+    function LastFieldsLine(AEnd: Int64): string;
   end;
 
   TLogTailer = class
   private
     FPatterns: TStringList;
     FFiles: TStringList;      { path -> TTailFile }
+    FRetired: TStringList;    { path=position of files let go for being idle }
     FFromStart: Boolean;
     FLastScan: QWord;
     FStarted: Boolean;
@@ -106,23 +120,93 @@ begin
   inherited Create;
   Path := APath;
   Handle := feInvalidHandle;
+  Layouts := TFPObjectList.Create(True);
 end;
 
 destructor TTailFile.Destroy;
 begin
   Close;
+  Layouts.Free;
   inherited Destroy;
 end;
 
+procedure TTailFile.SetLayout(const AFieldsLine: string);
+begin
+  Layout := TW3CLayout.Create(AFieldsLine);
+  Layouts.Add(Layout);
+end;
+
+procedure TTailFile.Prune;
+begin
+  while (Layouts.Count > 0) and (Layouts[0] <> Layout) do
+    Layouts.Delete(0);
+end;
+
+function TTailFile.LastFieldsLine(AEnd: Int64): string;
+const
+  COverlap = 16;
+  CScanChunk = 1024 * 1024;
+var
+  LPos, LStart, LFound: Int64;
+  LBuf: string;
+  LGot, I, P: Integer;
+begin
+  Result := '';
+  LPos := AEnd;
+  LFound := -1;
+  while (LPos > 0) and (LFound < 0) do
+  begin
+    if LPos > CScanChunk then LStart := LPos - CScanChunk else LStart := 0;
+    SetLength(LBuf, LPos - LStart + COverlap);
+    FileSeek(Handle, LStart, fsFromBeginning);
+    LGot := FileRead(Handle, LBuf[1], Length(LBuf));
+    if LGot <= 0 then
+      Break;
+    SetLength(LBuf, LGot);
+    { the last "#Fields:" that starts a line; one at the chunk's very start is
+      judged with the chunk before it, which overlaps it }
+    P := 0;
+    repeat
+      P := PosEx('#Fields:', LBuf, P + 1);
+      if P = 0 then
+        Break;
+      if ((P = 1) and (LStart = 0)) or ((P > 1) and (LBuf[P - 1] = #10)) then
+        if LStart + P - 1 < AEnd then
+          LFound := LStart + P - 1;
+    until False;
+    LPos := LStart;
+  end;
+  if LFound < 0 then
+    Exit;
+  SetLength(LBuf, 8192);
+  FileSeek(Handle, LFound, fsFromBeginning);
+  LGot := FileRead(Handle, LBuf[1], Length(LBuf));
+  if LGot <= 0 then
+    Exit;
+  SetLength(LBuf, LGot);
+  I := Pos(#10, LBuf);
+  if I > 0 then
+    SetLength(LBuf, I - 1);
+  Result := TrimRight(LBuf);
+end;
+
 function TTailFile.Open(AFromEnd: Boolean): Boolean;
+var
+  LFields: string;
 begin
   Close;
   Handle := FileOpen(Path, fmOpenRead or fmShareDenyNone);
   if Handle = feInvalidHandle then
     Exit(False);
   Ino := HandleIno(Handle);
+  Layout := nil;
   if AFromEnd then
-    Position := FileSeek(Handle, Int64(0), fsFromEnd)
+  begin
+    Position := FileSeek(Handle, Int64(0), fsFromEnd);
+    LFields := LastFieldsLine(Position);
+    if LFields <> '' then
+      SetLayout(LFields);
+  end
   else
     Position := 0;
   Partial := '';
@@ -164,8 +248,10 @@ begin
           SetLength(LLine, Length(LLine) - 1);
         if Length(LLine) > CMaxLine then
           SetLength(LLine, CMaxLine);
-        if LLine <> '' then
-          ALines.Add(LLine);
+        if IsW3CFieldsLine(LLine) then
+          SetLayout(LLine)
+        else if LLine <> '' then
+          ALines.AddObject(LLine, Layout);
         LStart := I + 1;
         Result := True;
       end;
@@ -210,6 +296,7 @@ begin
   FFiles := TStringList.Create;
   FFiles.Sorted := True;
   FFiles.OwnsObjects := True;
+  FRetired := TStringList.Create;
   FFromStart := AFromStart;
   MaxLineLen := CMaxLine;
   Rescan;
@@ -219,6 +306,7 @@ end;
 destructor TLogTailer.Destroy;
 begin
   FFiles.Free;
+  FRetired.Free;
   FPatterns.Free;
   inherited Destroy;
 end;
@@ -228,7 +316,8 @@ var
   LPattern, LDir, LPath: string;
   LRec: TSearchRec;
   LFile: TTailFile;
-  I: Integer;
+  I, J: Integer;
+  LPos: Int64;
 begin
   for I := 0 to FFiles.Count - 1 do
     TTailFile(FFiles.Objects[I]).Seen := False;
@@ -255,12 +344,28 @@ begin
       repeat
         LPath := LDir + LRec.Name;
         I := FFiles.IndexOf(LPath);
+        (* a match nobody has written to for a day is finished: IIS starts a
+           new u_exYYMMDD.log every day and keeps the old ones forever, so
+           u_ex*.log would otherwise hold a handle on years of logs, and a
+           daemon running for months would gain one file a day *)
+        if (LRec.Time <> -1) and (Now - FileDateToDateTime(LRec.Time) > 1) and
+           ((I < 0) or (TTailFile(FFiles.Objects[I]).Position >= LRec.Size)) then
+          Continue;   { not Seen: one we were following is let go below }
         if I < 0 then
         begin
           LFile := TTailFile.Create(LPath);
           FFiles.AddObject(LPath, LFile);
-          { files there at startup start at their end; later ones at 0 }
+          { files there at startup start at their end; later ones at 0; one let go
+            for being idle carries on where it was (or at 0 if it was truncated) }
           LFile.Open(not FFromStart and not FStarted);
+          J := FRetired.IndexOfName(LPath);
+          if J >= 0 then
+          begin
+            LPos := StrToInt64Def(FRetired.ValueFromIndex[J], 0);
+            if LPos <= LRec.Size then
+              LFile.Position := LPos;
+            FRetired.Delete(J);
+          end;
         end
         else
           LFile := TTailFile(FFiles.Objects[I]);
@@ -272,7 +377,11 @@ begin
   end;
   for I := FFiles.Count - 1 downto 0 do
     if not TTailFile(FFiles.Objects[I]).Seen then
+    begin
+      if FRetired.Count < 100000 then
+        FRetired.Values[FFiles[I]] := IntToStr(TTailFile(FFiles.Objects[I]).Position);
       FFiles.Delete(I);
+    end;
   FLastScan := GetTickCount64;
 end;
 
@@ -289,6 +398,7 @@ begin
   for I := 0 to FFiles.Count - 1 do
   begin
     LFile := TTailFile(FFiles.Objects[I]);
+    LFile.Prune;
     if LFile.ReadNew(ALines, 4 * CChunk) then
       Result := True;
     LFile.CheckRotation;
