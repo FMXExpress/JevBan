@@ -97,8 +97,39 @@ asks about each client at once, if you'd rather have the lowest latency.
 | `mode` | What answers | Setup |
 |---|---|---|
 | `local` (default) | OpenJev in-process on llama.cpp | none: the model downloads on first start |
-| `jev` | a `/v1/systemone` server: the [hosted Jev API](https://docs.typesafe.ai/introduction) (`https://api.typesafe.ai/v1/systemone`, `api_key`) or OpenJev's helper | the server |
+| `jev` | a hosted decision API (`provider =`, below), or any `/v1/systemone` server (`url =`), e.g. OpenJev's helper | an API key, or the server |
 | `rules` | the signatures alone | none |
+
+### Hosted providers (`provider` / `--provider`)
+
+```bash
+TYPESAFE_API_KEY=... jevban --provider typesafe
+```
+
+`provider =` sets `mode = jev`, the URL and the model, and takes the key from `api_key =`, the
+provider's own variable, or `JEV_API_KEY`. The endpoints and model ids come from each provider's
+documentation (October 2026). All take the Jev request body with `Authorization: Bearer`. Each
+one answered jevban's request with 401 "invalid key" to a dummy key; none has been tried with a
+real key yet.
+
+| `provider` | Endpoint | Model | Key variable | Input $/1M tokens |
+|---|---|---|---|---|
+| `typesafe` | `https://api.typesafe.ai/v1/systemone` | `jev-latest` (Jev 1.14) | `TYPESAFE_API_KEY` | 0.042 |
+| `perplexity` | `https://api.perplexity.ai/v1/decisions` | `pplx-decider-latest` | `PERPLEXITY_API_KEY` | 0.02 |
+| `perplexity-flash` | same | `pplx-decider-flash-latest` | `PERPLEXITY_API_KEY` | 0.01 |
+| `liquid` | `https://api.liquid.ai/decisions/v1/systemone` | `d1.1` | `LIQUID_API_KEY` | see liquid.ai/pricing |
+| `digitalocean` | `https://inference.do-ai.run/v1/systemone` | `typesafe-jev-1.13.0` | `MODEL_ACCESS_KEY` | see DigitalOcean |
+| `abacus` | `https://routellm.abacus.ai/v1/systemone` | `jev-latest` | `ABACUS_API_KEY` | 0.042 |
+| `vercel` | `https://ai-gateway.vercel.sh/typesafe/v1/systemone` | `typesafe-ai/jev` | `AI_GATEWAY_API_KEY` | see Vercel |
+
+Output is free with all of them. A flagged client is roughly 500–800 input tokens, so 1,000
+decisions cost a few cents. Abacus allows 10 questions per request and 20 requests a minute on
+self-serve plans; the preset caps `batch_clients` and `max_per_minute` to fit. `url =` or
+`model =` set alongside `provider =` override the preset's. A refused or failed request (401,
+429, 529, a timeout) makes the signatures decide for that batch.
+
+Not presets: Cloudflare's Clef runs at an account-specific Workers AI path with an undocumented
+response wrapper, and OpenRouter has no decision endpoint.
 
 ### Local models (`local_model` / `--model`)
 

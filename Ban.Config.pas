@@ -46,6 +46,7 @@ type
     GpuLayers: Integer;
     CtxTokens: Integer;
     ReadoutT, NoulT, NoulBias: Double;   { 0 = the model card's values (NoulBias: NaN) }
+    Provider: string;         { a hosted /v1/systemone service (CProviders), or '' }
     JevUrl: string;
     JevKey: string;
     JevModel: string;
@@ -77,6 +78,8 @@ type
     ListBans: Boolean;
     constructor Create;
     destructor Destroy; override;
+    { fills url, model and the key from Provider where the config left them unset }
+    procedure ApplyProvider(AUrlSet, AModelSet: Boolean);
     { parses the command line; raises EArgumentException on a bad option.
       Returns False when --help/--version printed and the program should exit }
     function Load: Boolean;
@@ -84,14 +87,55 @@ type
   end;
 
 procedure PrintUsage;
+function ProviderNames: string;
+
+type
+  TProviderInfo = record
+    Name: string;
+    Url: string;
+    Model: string;
+    KeyEnv: string;          { the variable the provider's docs use for the key }
+    MaxQuestions: Integer;   { per request; 0 = no stated limit }
+    MaxPerMinute: Integer;   { requests; 0 = no stated limit }
+  end;
 
 const
   CVersion = '1.0.0';
+  { from each provider's own documentation (October 2026); all take the Jev request
+    body and Authorization: Bearer <key> }
+  CProviders: array[0..6] of TProviderInfo = (
+    (Name: 'typesafe'; Url: 'https://api.typesafe.ai/v1/systemone'; Model: 'jev-latest';
+      KeyEnv: 'TYPESAFE_API_KEY'; MaxQuestions: 0; MaxPerMinute: 0),
+    (Name: 'perplexity'; Url: 'https://api.perplexity.ai/v1/decisions'; Model: 'pplx-decider-latest';
+      KeyEnv: 'PERPLEXITY_API_KEY'; MaxQuestions: 0; MaxPerMinute: 0),
+    (Name: 'perplexity-flash'; Url: 'https://api.perplexity.ai/v1/decisions'; Model: 'pplx-decider-flash-latest';
+      KeyEnv: 'PERPLEXITY_API_KEY'; MaxQuestions: 0; MaxPerMinute: 0),
+    (Name: 'liquid'; Url: 'https://api.liquid.ai/decisions/v1/systemone'; Model: 'd1.1';
+      KeyEnv: 'LIQUID_API_KEY'; MaxQuestions: 0; MaxPerMinute: 0),
+    (Name: 'digitalocean'; Url: 'https://inference.do-ai.run/v1/systemone'; Model: 'typesafe-jev-1.13.0';
+      KeyEnv: 'MODEL_ACCESS_KEY'; MaxQuestions: 0; MaxPerMinute: 0),
+    (Name: 'abacus'; Url: 'https://routellm.abacus.ai/v1/systemone'; Model: 'jev-latest';
+      KeyEnv: 'ABACUS_API_KEY'; MaxQuestions: 10; MaxPerMinute: 20),
+    (Name: 'vercel'; Url: 'https://ai-gateway.vercel.sh/typesafe/v1/systemone'; Model: 'typesafe-ai/jev';
+      KeyEnv: 'AI_GATEWAY_API_KEY'; MaxQuestions: 0; MaxPerMinute: 0));
 
 implementation
 
 uses
   Ban.Jev;
+
+function ProviderNames: string;
+var
+  I: Integer;
+begin
+  Result := '';
+  for I := 0 to High(CProviders) do
+  begin
+    if Result <> '' then
+      Result := Result + ', ';
+    Result := Result + CProviders[I].Name;
+  end;
+end;
 
 procedure PrintUsage;
 begin
@@ -107,6 +151,8 @@ begin
   WriteLn('                         | rules (signatures only)');
   WriteLn('      --model NAME       local model: flash-9b (5.6 GB, default), flash-9b-q5/-q6/-q8, 27b,');
   WriteLn('                         27b-q5/-q6/-q8, or a .gguf path; downloaded on first use');
+  WriteLn('  -p, --provider NAME    ask a hosted decision API (implies --mode jev; key in api_key or the');
+  WriteLn('                         provider''s variable): ' + ProviderNames);
   WriteLn('  -u, --jev-url URL      ask this /v1/systemone server instead (implies --mode jev)');
   WriteLn('  -a, --action TYPE      iptables | nftables | ufw | firewalld | fail2ban | netsh | command | none');
   WriteLn('  -b, --batch SECONDS    queue flagged clients and ask the decider about them in one request');
@@ -116,7 +162,8 @@ begin
   WriteLn('  -h, --help             this text');
   WriteLn('      --version');
   WriteLn;
-  WriteLn('environment: JEV_API_KEY (bearer token for the decision API), HTTPS_PROXY, HTTP_PROXY, NO_PROXY');
+  WriteLn('environment: JEV_API_KEY or the provider''s own (TYPESAFE_API_KEY, PERPLEXITY_API_KEY,');
+  WriteLn('  LIQUID_API_KEY, MODEL_ACCESS_KEY, ABACUS_API_KEY, AI_GATEWAY_API_KEY), HTTPS_PROXY, NO_PROXY');
 end;
 
 constructor TBanConfig.Create;
@@ -213,6 +260,7 @@ var
   LIni: TMemIniFile;
   LCliLogs: TStringList;
   LCli: TStringList;   { name=value from the command line, applied after the file }
+  LUrlSet, LModelSet: Boolean;
 
   function NextVal: string;
   begin
@@ -270,6 +318,8 @@ begin
         LCli.Values['url'] := NextVal
       else if (LArg = '-a') or (LArg = '--action') then
         LCli.Values['type'] := NextVal
+      else if (LArg = '-p') or (LArg = '--provider') then
+        LCli.Values['provider'] := NextVal
       else if LArg = '--model' then
         LCli.Values['local_model'] := NextVal
       else if (LArg = '-b') or (LArg = '--batch') then
@@ -318,7 +368,10 @@ begin
       Verbose := LIni.ReadBool('jevban', 'verbose', Verbose);
 
       Mode := LowerCase(LIni.ReadString('decider', 'mode', Mode));
-      JevUrl := LIni.ReadString('decider', 'url', JevUrl);
+      Provider := LowerCase(Trim(LIni.ReadString('decider', 'provider', '')));
+      LUrlSet := Trim(LIni.ReadString('decider', 'url', '')) <> '';
+      if LUrlSet then
+        JevUrl := Trim(LIni.ReadString('decider', 'url', ''));
       LocalModel := LIni.ReadString('decider', 'local_model', LocalModel);
       if LIni.ReadString('decider', 'model_dir', '') <> '' then
         ModelDir := LIni.ReadString('decider', 'model_dir', '');
@@ -331,7 +384,9 @@ begin
       NoulT := F('noul_t', NoulT);
       NoulBias := F('noul_bias', NoulBias);
       JevKey := LIni.ReadString('decider', 'api_key', JevKey);
-      JevModel := LIni.ReadString('decider', 'model', JevModel);
+      LModelSet := Trim(LIni.ReadString('decider', 'model', '')) <> '';
+      if LModelSet then
+        JevModel := Trim(LIni.ReadString('decider', 'model', ''));
       TimeoutMs := LIni.ReadInteger('decider', 'timeout_ms', TimeoutMs);
       Threshold := F('threshold', Threshold);
       InstantThreshold := F('instant_threshold', InstantThreshold);
@@ -372,8 +427,15 @@ begin
       DryRun := True;
     if LCli.Values['mode'] <> '' then
       Mode := LowerCase(LCli.Values['mode']);
+    if LCli.Values['provider'] <> '' then
+    begin
+      Provider := LowerCase(LCli.Values['provider']);
+      LUrlSet := False;
+      LModelSet := False;
+    end;
     if LCli.Values['url'] <> '' then
     begin
+      LUrlSet := True;
       JevUrl := LCli.Values['url'];
       if LCli.Values['mode'] = '' then
         Mode := 'jev';   { --jev-url alone means: use that server }
@@ -384,6 +446,12 @@ begin
       BatchInterval := StrToIntDef(LCli.Values['batch_interval'], BatchInterval);
     if LCli.Values['type'] <> '' then
       ActionType := LowerCase(LCli.Values['type']);
+    if Provider <> '' then
+    begin
+      if LCli.Values['mode'] = '' then
+        Mode := 'jev';
+      ApplyProvider(LUrlSet, LModelSet);
+    end;
     if JevKey = '' then
       JevKey := GetEnvironmentVariable('JEV_API_KEY');
     if TestMode then
@@ -397,7 +465,33 @@ begin
   end;
 end;
 
+procedure TBanConfig.ApplyProvider(AUrlSet, AModelSet: Boolean);
+var
+  I: Integer;
+  P: TProviderInfo;
+begin
+  for I := 0 to High(CProviders) do
+    if CProviders[I].Name = Provider then
+    begin
+      P := CProviders[I];
+      if not AUrlSet then
+        JevUrl := P.Url;
+      if not AModelSet then
+        JevModel := P.Model;
+      if JevKey = '' then
+        JevKey := GetEnvironmentVariable(P.KeyEnv);
+      if P.MaxQuestions > 0 then
+        BatchClients := Min(BatchClients, P.MaxQuestions);
+      if P.MaxPerMinute > 0 then
+        MaxPerMinute := Min(MaxPerMinute, P.MaxPerMinute);
+      Exit;
+    end;
+  raise EArgumentException.CreateFmt('unknown provider "%s" (%s)', [Provider, ProviderNames]);
+end;
+
 procedure TBanConfig.Validate;
+var
+  I: Integer;
 
   function Safe(const S: string; const AExtra: TSysCharSet): Boolean;
   var
@@ -418,6 +512,14 @@ begin
   { the hosted Jev API names its models jev-*; "openjev" is what the OpenJev helper ignores }
   if (Pos('api.typesafe.ai', LowerCase(JevUrl)) > 0) and (JevModel = 'openjev') then
     JevModel := 'jev-latest';
+  { two questions per client with ask_intent: keep the batch under the provider's cap }
+  if AskIntent and (Provider = 'abacus') then
+    BatchClients := Min(BatchClients, 5);
+  if (Mode = 'jev') and (Provider <> '') and (JevKey = '') then
+    for I := 0 to High(CProviders) do
+      if CProviders[I].Name = Provider then
+        raise EArgumentException.CreateFmt('provider %s needs an API key: set api_key in [decider], or %s ' +
+          'or JEV_API_KEY in the environment', [Provider, CProviders[I].KeyEnv]);
   if CtxTokens < 1024 then
     CtxTokens := 1024;
   if (OnError <> 'rules') and (OnError <> 'skip') then

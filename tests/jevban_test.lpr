@@ -8,7 +8,7 @@ program jevban_test;
 
 uses
   SysUtils, Classes, Math, fpjson, jsonparser,
-  Ban.Net, Ban.Apache, Ban.Signatures, Ban.Jev, Ban.Local;
+  Ban.Net, Ban.Apache, Ban.Signatures, Ban.Jev, Ban.Local, Ban.Config;
 
 var
   Failures: Integer = 0;
@@ -263,8 +263,44 @@ begin
   Check(not FindLocalModel('/tmp/x.gguf', LInfo), 'a path is not a key');
 end;
 
+procedure TestProviders;
+var
+  C: TBanConfig;
+begin
+  C := TBanConfig.Create;
+  try
+    C.Provider := 'typesafe';
+    C.ApplyProvider(False, False);
+    Check((C.JevUrl = 'https://api.typesafe.ai/v1/systemone') and (C.JevModel = 'jev-latest'), 'typesafe preset');
+    C.Provider := 'perplexity';
+    C.JevUrl := 'https://proxy.example/v1/decisions';
+    C.ApplyProvider(True, False);
+    Check((C.JevUrl = 'https://proxy.example/v1/decisions') and (C.JevModel = 'pplx-decider-latest'),
+      'an explicit url wins over the preset');
+    C.Provider := 'abacus';
+    C.BatchClients := 8;
+    C.MaxPerMinute := 120;
+    C.ApplyProvider(False, False);
+    Check((C.BatchClients = 8) and (C.MaxPerMinute = 20), 'abacus: 20 requests a minute, 8 <= 10 questions');
+    C.BatchClients := 30;
+    C.ApplyProvider(False, False);
+    Check(C.BatchClients = 10, 'abacus: at most 10 questions a request');
+    C.Provider := 'openrouter';
+    try
+      C.ApplyProvider(False, False);
+      Check(False, 'unknown provider raises');
+    except
+      on E: EArgumentException do
+        Check(Pos('typesafe', E.Message) > 0, 'unknown provider lists the known ones');
+    end;
+  finally
+    C.Free;
+  end;
+end;
+
 begin
   TestNet;
+  TestProviders;
   TestLocal;
   TestApache;
   TestSignatures;

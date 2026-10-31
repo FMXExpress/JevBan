@@ -235,7 +235,7 @@ end;
 
 function TJevClient.Describe: string;
 begin
-  Result := 'jev at ' + Url;
+  Result := Format('%s at %s', [Model, Url]);
 end;
 
 function TJevClient.Decide(AItems: TList; out AError: string; out ALatencyMs: Int64): Boolean;
