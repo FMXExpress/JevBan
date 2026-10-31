@@ -8,7 +8,7 @@ program jevban_test;
 
 uses
   SysUtils, Classes, Math, fpjson, jsonparser,
-  Ban.Net, Ban.Apache, Ban.Signatures, Ban.Jev, Ban.Local, Ban.Config, Ban.BadPaths, Ban.LogFormats;
+  Ban.Net, Ban.Apache, Ban.Signatures, Ban.Jev, Ban.Local, Ban.Config, Ban.BadPaths, Ban.LogFormats, Ban.Tail;
 
 var
   Failures: Integer = 0;
@@ -159,6 +159,53 @@ begin
     (E.Epoch = 1793440803), 'apache via the dispatcher');
   Check((ParseIsoTime('2026-10-31T10:00:03Z') = 1793440803) and (ParseIsoTime('2026-10-31 10:00:03') = 1793440803) and
     (ParseIsoTime('2026-10-31T05:30:03-0430') = 1793440803) and (ParseIsoTime('nope') = 0), 'iso time');
+end;
+
+procedure TestTailLayout;
+const
+  H1 = '#Fields: date time c-ip cs-method cs-uri-stem cs-uri-query sc-status sc-bytes';
+  H2 = '#Fields: date time s-sitename c-ip cs-method cs-uri-stem cs-uri-query sc-status';
+  L1 = '2026-10-31 09:00:00 198.51.100.1 GET /a - 200 10';
+  L2 = '2026-10-31 12:00:00 W3SVC1 198.51.100.1 GET /a - 200';
+
+  function Layout(const AText: string): string;
+  var
+    LPath: string;
+    LF: TTailFile;
+    LS: TStringList;
+  begin
+    LPath := GetTempFileName;
+    LS := TStringList.Create;
+    try
+      LS.Text := AText;
+      LS.SaveToFile(LPath);
+    finally
+      LS.Free;
+    end;
+    LF := TTailFile.Create(LPath);
+    try
+      LF.Open(True);
+      if LF.Layout = nil then
+        Result := ''
+      else if LF.Layout.ISite >= 0 then
+        Result := 'H2'
+      else
+        Result := 'H1';
+    finally
+      LF.Free;
+      DeleteFile(LPath);
+    end;
+  end;
+
+begin
+  Check(Layout('#Software: IIS' + LineEnding + H1 + LineEnding + L1 + LineEnding + L1) = 'H1',
+    'tail: the first header, still in effect');
+  Check(Layout(H1 + LineEnding + L1 + LineEnding + '#Software: IIS' + LineEnding + H2 + LineEnding + L2) = 'H2',
+    'tail: fields changed mid-file, found backwards');
+  Check(Layout(H1 + LineEnding + L1 + LineEnding + '#Software: IIS' + LineEnding + H2) = 'H2',
+    'tail: file ends in a fresh header block');
+  Check(Layout('192.0.2.1 - - [31/Oct/2026:10:00:03 +0000] "GET / HTTP/1.1" 200 1') = '',
+    'tail: not a W3C log');
 end;
 
 procedure TestSignatures;
@@ -411,6 +458,7 @@ begin
   TestLocal;
   TestApache;
   TestLogFormats;
+  TestTailLayout;
   TestSignatures;
   TestSignatureFile;
   TestJev;
