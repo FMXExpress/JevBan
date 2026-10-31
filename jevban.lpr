@@ -46,18 +46,25 @@ begin
 end;
 {$ENDIF}
 
-{ --eval lines: "attack<TAB>log line" or "benign<TAB>log line" }
-function SplitLabel(const ALine: string; out ATruth: Integer): string;
+{ --eval lines: "attack[:category]<TAB>log line" or "benign[:category]<TAB>log line" }
+function SplitLabel(const ALine: string; out ATruth: Integer; out ACategory: string): string;
 var
-  LTab: Integer;
+  LTab, LColon: Integer;
   LLabel: string;
 begin
   ATruth := CTruthUnknown;
+  ACategory := '';
   Result := ALine;
   LTab := Pos(#9, ALine);
   if LTab = 0 then
     Exit;
   LLabel := LowerCase(Trim(Copy(ALine, 1, LTab - 1)));
+  LColon := Pos(':', LLabel);
+  if LColon > 0 then
+  begin
+    ACategory := Copy(LLabel, 1, LColon - 1) + ':' + Copy(LLabel, LColon + 1, MaxInt);
+    LLabel := Copy(LLabel, 1, LColon - 1);
+  end;
   if LLabel = 'attack' then
     ATruth := CTruthAttack
   else if LLabel = 'benign' then
@@ -70,7 +77,7 @@ end;
 procedure RunTest;
 var
   I, LTruth: Integer;
-  LText: string;
+  LText, LCategory: string;
 begin
   for I := 0 to Cfg.LogPaths.Count - 1 do
     if not FileExists(Cfg.LogPaths[I]) then
@@ -87,8 +94,8 @@ begin
       begin
         if (Line = '') or (Line[1] = '#') then
           Continue;
-        LText := SplitLabel(Line, LTruth);
-        Engine.Feed(LText, LTruth);
+        LText := SplitLabel(Line, LTruth, LCategory);
+        Engine.Feed(LText, LTruth, LCategory);
       end
       else
         Engine.Feed(Line);
@@ -98,7 +105,7 @@ begin
   Engine.FlushAll;
   Engine.Log(Engine.Summary);
   if Cfg.EvalMode then
-    Engine.EvalReport;
+    Engine.EvalReport(Cfg.EvalJson);
 end;
 
 procedure RunDaemon;

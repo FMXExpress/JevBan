@@ -79,6 +79,7 @@ type
     { command line only }
     TestMode: Boolean;
     EvalMode: Boolean;        { --eval: TestMode on a labelled log }
+    EvalJson: string;         { --eval-json: the eval counts as JSON too }
     ListBans: Boolean;
     constructor Create;
     destructor Destroy; override;
@@ -152,6 +153,7 @@ begin
   WriteLn('  -t, --test FILE        read FILE once, print each decision, ban nothing (like fail2ban-regex)');
   WriteLn('      --eval FILE        replay a labelled log ("attack<TAB>line" / "benign<TAB>line") and count');
   WriteLn('                         the strike decisions of the signatures and of the live pipeline');
+  WriteLn('      --eval-json FILE   write the --eval counts to FILE as JSON too');
   WriteLn('      --shadow           ask the model and log its verdicts, but let the signatures ban');
   WriteLn('  -n, --dry-run          log the firewall commands instead of running them');
   WriteLn('  -m, --mode MODE        local (OpenJev in-process, the default) | jev (a /v1/systemone server)');
@@ -340,6 +342,8 @@ begin
         TestMode := True;
         EvalMode := True;
       end
+      else if LArg = '--eval-json' then
+        EvalJson := NextVal
       else if LArg = '--shadow' then
         LCli.Values['shadow'] := '1'
       else if LArg = '--list' then
