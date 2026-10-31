@@ -12,7 +12,7 @@ program jevban;
 uses
   {$IFDEF UNIX}cthreads, BaseUnix,{$ENDIF}
   SysUtils, Classes,
-  Ban.Config, Ban.Tail, Ban.Engine;
+  Ban.Config, Ban.Tail, Ban.Engine, Ban.Jev;
 
 var
   Cfg: TBanConfig;
@@ -25,7 +25,12 @@ var
 {$IFDEF UNIX}
 procedure OnSignal(ASig: cint); cdecl;
 begin
+  { the first signal stops cleanly (bans saved, actionstop); a second one
+    does not wait for a model decision in progress }
+  if Stopping then
+    FpExit(128 + ASig);
   Stopping := True;
+  DeciderAbort := True;
 end;
 
 procedure InstallSignals;
@@ -50,10 +55,14 @@ begin
       raise EArgumentException.CreateFmt('%s not found', [Cfg.LogPaths[I]]);
   Engine.InitDecider;
   Engine.Log(Format('test run over %s, decider %s', [Tailer.FileNames, Engine.Describe]));
-  while Tailer.Poll(Lines) do
+  while not Stopping and Tailer.Poll(Lines) do
   begin
     for Line in Lines do
+    begin
+      if Stopping then
+        Break;
       Engine.Feed(Line);
+    end;
     Lines.Clear;
   end;
   Engine.FlushAll;

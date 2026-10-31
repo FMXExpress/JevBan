@@ -197,6 +197,36 @@ begin
   Result := Result + ']';
 end;
 
+{ FPC 3.2.2's TThread.ProcessorCount and GetCPUCount are 1 on Linux }
+function CpuCount: Integer;
+{$IFDEF LINUX}
+var
+  LInfo: TStringList;
+  LLine: string;
+begin
+  Result := 0;
+  LInfo := TStringList.Create;
+  try
+    try
+      LInfo.LoadFromFile('/proc/cpuinfo');
+    except
+      on E: EStreamError do
+        Exit(1);
+    end;
+    for LLine in LInfo do
+      if Copy(LLine, 1, 9) = 'processor' then
+        Inc(Result);
+  finally
+    LInfo.Free;
+  end;
+  Result := Max(1, Result);
+end;
+{$ELSE}
+begin
+  Result := Max(1, Integer(GetCPUCount));
+end;
+{$ENDIF}
+
 procedure QuietLog(ALevel: Int32; AText: PAnsiChar; AUserData: Pointer); cdecl;
 begin
   { GGML_LOG_LEVEL_ERROR = 4; the rest is load chatter }
@@ -230,7 +260,7 @@ begin
   FVocab := llama_model_get_vocab(FModel);
   FNVocab := llama_vocab_n_tokens(FVocab);
   if AThreads <= 0 then
-    AThreads := Max(1, Integer(TThread.ProcessorCount) - 1);
+    AThreads := Max(1, CpuCount - 1);
   FNCtx := ANCtx;
   FNBatch := 512;
   CP := llama_context_default_params();
@@ -377,6 +407,8 @@ begin
   try
     for I := 0 to AItems.Count - 1 do
     begin
+      if DeciderAbort then
+        raise Exception.Create('stopping');
       LItem := TJevItem(AItems[I]);
       { a client with a long history: drop its oldest context until it fits }
       repeat

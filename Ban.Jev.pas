@@ -67,6 +67,10 @@ type
     function Describe: string; override;
   end;
 
+var
+  { set on shutdown: a decider stops between clients and reports an error }
+  DeciderAbort: Boolean = False;
+
 function ParseJevResponse(const ABody: string; AItems: TList; out AError: string): Boolean;
 
 const
