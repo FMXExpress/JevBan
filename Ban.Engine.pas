@@ -39,7 +39,7 @@ interface
 
 uses
   SysUtils, Classes, Math, Contnrs, SyncObjs, fpjson, jsonparser,
-  Ban.Net, Ban.Apache, Ban.LogFormats, Ban.Signatures, Ban.BadPaths, Ban.Jev, Ban.Local, Ban.Firewall, Ban.Config;
+  Ban.Net, Ban.Hash, Ban.Apache, Ban.LogFormats, Ban.Signatures, Ban.BadPaths, Ban.Jev, Ban.Local, Ban.Firewall, Ban.Config;
 
 const
   { --eval labels }
@@ -179,7 +179,8 @@ type
     FSigs: TSignatureSet;
     FDecider: TDecider;      { nil in rules mode, or when the local model could not be loaded }
     FAction: TBanAction;
-    FClients: TStringList;   { ip -> TClient }
+    FClients: TStrMap;       { ip -> TClient (owned) }
+    FPurgeNow: Int64;
     FBans: TStringList;      { ip -> TBanRecord }
     FMinute: Int64;
     FMinuteCalls: Integer;
@@ -193,9 +194,9 @@ type
     FLastNow: Int64;
     FBad: TBadPaths;         { nil when badpaths = off }
     FWorker: TDeciderWorker; { live daemon only }
-    FLongHits: TStringList;  { address -> TLongHits }
+    FLongHits: TStrMap;      { address -> TLongHits (owned) }
     FStrikeCap: Integer;     { strikes one verdict may still give; -1 = no limit }
-    FNets: TStringList;      { subnet -> TNetHeat }
+    FNets: TStrMap;          { subnet -> TNetHeat (owned) }
     { --eval: strike decisions per labelled request, rules alone and the whole pipeline }
     FEvalRules, FEvalLive: TConfusion;
     FEvalAfterBan: array[CTruthBenign..CTruthAttack] of Int64;
@@ -227,6 +228,7 @@ type
     procedure ProbeHit(C: TClient; ANow: Int64; const AReason: string);
     procedure Purge(ANow: Int64);
     procedure EvictOldest(ACount: Integer);
+    procedure DropClients(ALimit: Int64; AByLastSeen: Boolean);
     procedure LoadState;
     procedure SaveState;
   public
@@ -444,12 +446,8 @@ begin
   FEvalClients := TStringList.Create;
   FEvalClients.Sorted := True;
   FEvalClients.OwnsObjects := True;
-  FLongHits := TStringList.Create;
-  FLongHits.Sorted := True;
-  FLongHits.OwnsObjects := True;
-  FNets := TStringList.Create;
-  FNets.Sorted := True;
-  FNets.OwnsObjects := True;
+  FLongHits := TStrMap.Create(True, 1024);
+  FNets := TStrMap.Create(True, 1024);
   FEvalCats := TStringList.Create;
   FEvalCats.Sorted := True;
   FEvalCats.OwnsObjects := True;
@@ -466,9 +464,7 @@ begin
   FAction.UnbanCmd := FCfg.ActionUnban;
   FAction.DryRun := FCfg.DryRun;
   FAction.ApplyPreset;
-  FClients := TStringList.Create;
-  FClients.Sorted := True;
-  FClients.OwnsObjects := True;
+  FClients := TStrMap.Create(True, 1024);
   FBans := TStringList.Create;
   FBans.Sorted := True;
   FBans.OwnsObjects := True;
@@ -559,25 +555,52 @@ var
   end;
 
 begin
-  N := FClients.Count;
-  SetLength(LSeen, N);
-  for I := 0 to N - 1 do
-    LSeen[I] := TClient(FClients.Objects[I]).LastSeen;
+  N := 0;
+  SetLength(LSeen, FClients.Count);
+  for I := 0 to FClients.Capacity - 1 do
+    if FClients.Used(I) then
+    begin
+      LSeen[N] := TClient(FClients.ValueAt(I)).LastSeen;
+      Inc(N);
+    end;
+  if N = 0 then
+    Exit;
   Sort(0, N - 1);
   LCutoff := LSeen[Min(ACount, N) - 1];
-  for I := N - 1 downto 0 do
-    if (TClient(FClients.Objects[I]).LastSeen <= LCutoff) and not TClient(FClients.Objects[I]).Queued and
-       not TClient(FClients.Objects[I]).InFlight then
-      FClients.Delete(I);
+  DropClients(LCutoff, True);
+end;
+
+procedure TBanEngine.DropClients(ALimit: Int64; AByLastSeen: Boolean);
+var
+  LKeys: array of string;
+  I, N: Integer;
+  C: TClient;
+begin
+  { collected first: deleting moves entries within the map }
+  SetLength(LKeys, FClients.Count);
+  N := 0;
+  for I := 0 to FClients.Capacity - 1 do
+    if FClients.Used(I) then
+    begin
+      C := TClient(FClients.ValueAt(I));
+      if C.Queued or C.InFlight then
+        Continue;
+      { by last seen: seen at or before ALimit; else idle: unseen for more than ALimit seconds at FPurgeNow }
+      if (AByLastSeen and (C.LastSeen <= ALimit)) or (not AByLastSeen and (FPurgeNow - C.LastSeen > ALimit)) then
+      begin
+        LKeys[N] := FClients.KeyAt(I);
+        Inc(N);
+      end;
+    end;
+  for I := 0 to N - 1 do
+    FClients.Delete(LKeys[I]);
 end;
 
 function TBanEngine.GetClient(const E: TAccessEntry; ANow: Int64): TClient;
-var
-  I: Integer;
 begin
-  I := FClients.IndexOf(E.IpText);
-  if I >= 0 then
-    Exit(TClient(FClients.Objects[I]));
+  Result := TClient(FClients.Get(E.IpText));
+  if Result <> nil then
+    Exit;
   if FClients.Count >= FCfg.MaxClients then
   begin
     Purge(ANow);
@@ -589,7 +612,7 @@ begin
   Result := TClient.Create;
   Result.IpText := E.IpText;
   Result.Ip := E.Ip;
-  FClients.AddObject(E.IpText, Result);
+  FClients.Put(E.IpText, Result);
 end;
 
 procedure TBanEngine.Feed(const ALine: string; ATruth: Integer; const ACategory: string; ALayout: TObject);
@@ -660,7 +683,6 @@ begin
   end;
   C := GetClient(E, LNow);
   C.LastSeen := LNow;
-  LSummary := EntrySummary(E);
   if C.Agent = '' then
     C.Agent := E.Agent;
   LModelLine := CompactSummary(E, C.Agent);
@@ -779,9 +801,11 @@ begin
     if LScore >= FCfg.SuspiciousScore then
     begin
       Inc(Stats.Suspicious);
+      { the log's line, only for the lines that are logged }
+      LSummary := EntrySummary(E);
       Judge(C, LSummary, LModelLine, LTags.CommaText, LScore, ATruth, ACategory, LNow);
       if (LScore >= FCfg.RulesMinScore) and not IsBanned(C.IpText) then
-        ProbeHit(C, LNow, Format('%s, score %d', [LTags.CommaText, LScore]));
+        ProbeHit(C, LNow, LTags.CommaText + ', score ' + IntToStr(LScore));
     end
     else
       { not flagged: neither rules nor model strike }
@@ -1463,10 +1487,12 @@ begin
      remembered per address for longtime *)
   if FCfg.LongRetry > 0 then
   begin
-    I := FLongHits.IndexOf(C.IpText);
-    if I < 0 then
-      I := FLongHits.AddObject(C.IpText, TLongHits.Create);
-    LLong := TLongHits(FLongHits.Objects[I]);
+    LLong := TLongHits(FLongHits.Get(C.IpText));
+    if LLong = nil then
+    begin
+      LLong := TLongHits.Create;
+      FLongHits.Put(C.IpText, LLong);
+    end;
     J := 0;
     for I := 0 to High(LLong.Times) do
       if ANow - LLong.Times[I] < FCfg.LongTime then
@@ -1490,10 +1516,12 @@ begin
   if FCfg.SubnetRetry > 0 then
   begin
     LKey := SubnetKey(C.Ip);
-    I := FNets.IndexOf(LKey);
-    if I < 0 then
-      I := FNets.AddObject(LKey, TNetHeat.Create);
-    LNet := TNetHeat(FNets.Objects[I]);
+    LNet := TNetHeat(FNets.Get(LKey));
+    if LNet = nil then
+    begin
+      LNet := TNetHeat.Create;
+      FNets.Put(LKey, LNet);
+    end;
     for J := LNet.Ips.Count - 1 downto 0 do
       if ANow - PtrInt(LNet.Ips.Objects[J]) >= FCfg.FindTime then
         LNet.Ips.Delete(J);
@@ -1565,33 +1593,45 @@ end;
 
 procedure TBanEngine.Purge(ANow: Int64);
 var
-  I: Integer;
-  C: TClient;
+  I, N: Integer;
+  LKeys: array of string;
   B: TBanRecord;
   LIdle: Int64;
   J: Integer;
   LFresh: Boolean;
 begin
   LIdle := Max(FCfg.FindTime, FCfg.CacheSecs);
-  for I := FClients.Count - 1 downto 0 do
-  begin
-    C := TClient(FClients.Objects[I]);
-    if (ANow - C.LastSeen > LIdle) and not C.Queued and not C.InFlight then
-      FClients.Delete(I);
-  end;
-  for I := FLongHits.Count - 1 downto 0 do
-    with TLongHits(FLongHits.Objects[I]) do
-      if (Length(Times) = 0) or (ANow - Times[High(Times)] >= FCfg.LongTime) then
-        FLongHits.Delete(I);
-  for I := FNets.Count - 1 downto 0 do
-    with TNetHeat(FNets.Objects[I]) do
-    begin
-      LFresh := False;
-      for J := 0 to Ips.Count - 1 do
-        LFresh := LFresh or (ANow - PtrInt(Ips.Objects[J]) < FCfg.FindTime);
-      if (HotUntil <= ANow) and not LFresh then
-        FNets.Delete(I);
-    end;
+  FPurgeNow := ANow;
+  DropClients(LIdle, False);
+  { collected first: deleting moves entries within a map }
+  N := 0;
+  SetLength(LKeys, FLongHits.Count + FNets.Count);
+  for I := 0 to FLongHits.Capacity - 1 do
+    if FLongHits.Used(I) then
+      with TLongHits(FLongHits.ValueAt(I)) do
+        if (Length(Times) = 0) or (ANow - Times[High(Times)] >= FCfg.LongTime) then
+        begin
+          LKeys[N] := FLongHits.KeyAt(I);
+          Inc(N);
+        end;
+  for I := 0 to N - 1 do
+    FLongHits.Delete(LKeys[I]);
+  N := 0;
+  for I := 0 to FNets.Capacity - 1 do
+    if FNets.Used(I) then
+      with TNetHeat(FNets.ValueAt(I)) do
+      begin
+        LFresh := False;
+        for J := 0 to Ips.Count - 1 do
+          LFresh := LFresh or (ANow - PtrInt(Ips.Objects[J]) < FCfg.FindTime);
+        if (HotUntil <= ANow) and not LFresh then
+        begin
+          LKeys[N] := FNets.KeyAt(I);
+          Inc(N);
+        end;
+      end;
+  for I := 0 to N - 1 do
+    FNets.Delete(LKeys[I]);
   { an expired ban is remembered for bantime.increment until maxtime passes }
   for I := FBans.Count - 1 downto 0 do
   begin

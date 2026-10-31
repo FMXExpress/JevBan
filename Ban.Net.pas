@@ -207,7 +207,8 @@ var
   I, LBestAt, LBestLen, LRunAt, LRunLen: Integer;
 begin
   if A.IsV4 then
-    Exit(Format('%d.%d.%d.%d', [A.Bytes[12], A.Bytes[13], A.Bytes[14], A.Bytes[15]]));
+    Exit(IntToStr(A.Bytes[12]) + '.' + IntToStr(A.Bytes[13]) + '.' + IntToStr(A.Bytes[14]) + '.' +
+      IntToStr(A.Bytes[15]));
   for I := 0 to 7 do
     LWords[I] := A.Bytes[I * 2] shl 8 or A.Bytes[I * 2 + 1];
   { the longest run of two or more zero groups becomes '::' }
