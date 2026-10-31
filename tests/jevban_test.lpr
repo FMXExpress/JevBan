@@ -96,6 +96,12 @@ begin
   Check(ParseAccessLine('192.0.2.1 - - [31/Oct/2026:10:00:11 +0000] "GET /%252e%252e/etc/passwd HTTP/1.1" 404 1', E) and
     (E.Decoded = '/../etc/passwd'), 'double url-decoding: ' + E.Decoded);
 
+  Check(ParseAccessLine('192.0.2.1 - - [31/Oct/2026:10:00:11 +0000] "GET /a HTTP/1.1" 404 9 "https://x/" "curl/8"', E),
+    'compact source');
+  Check(CompactSummary(E, 'curl/8') = '10:00:11 GET /a HTTP/1.1 404 9 ref="https://x/"', 'compact: usual agent left out: ' +
+    CompactSummary(E, 'curl/8'));
+  Check(CompactSummary(E, 'other') = '10:00:11 GET /a HTTP/1.1 404 9 ref="https://x/" ua="curl/8"',
+    'compact: a different agent is shown');
   Check(not ParseAccessLine('garbage', E), 'garbage');
   Check(not ParseAccessLine('not-an-ip - - [31/Oct/2026:10:00:11 +0000] "GET / HTTP/1.1" 200 1', E), 'hostname client');
   Check(not ParseAccessLine('', E), 'empty');

@@ -101,6 +101,7 @@ type
   end;
 
   TGgmlLogCallback = procedure(ALevel: Int32; AText: PAnsiChar; AUserData: Pointer); cdecl;
+  TGgmlLoadAll = procedure(ADir: PAnsiChar); cdecl;
 
 var
   llama_backend_init: procedure; cdecl;
@@ -160,6 +161,7 @@ procedure LlamaLoad(const ADir: string);
 var
   LName, LPath, LMissing: string;
   H, LLlama: TLibHandle;
+  LoadAll: TGgmlLoadAll;
 
   procedure Bind(var AProc; const ASym: string);
   begin
@@ -211,6 +213,22 @@ begin
   Bind(llama_get_logits_ith, 'llama_get_logits_ith');
   if LMissing <> '' then
     raise Exception.Create('llama.cpp library is not ' + LLAMA_TAG + '-compatible, missing:' + LMissing);
+  (* a build with GGML_BACKEND_DL ships one CPU library per instruction set
+     (libggml-cpu-haswell, -skylakex, -zen4, ...) and picks the best at run
+     time: on AVX-512 hardware 1.56x faster than the portable AVX2 build. In a
+     build without it, this finds nothing to load and is harmless. *)
+  for H in GHandles do
+  begin
+    LoadAll := TGgmlLoadAll(GetProcedureAddress(H, 'ggml_backend_load_all_from_path'));
+    if Assigned(LoadAll) then
+    begin
+      if ADir <> '' then
+        LoadAll(PAnsiChar(AnsiString(ExcludeTrailingPathDelimiter(ADir))))
+      else
+        LoadAll(nil);
+      Break;
+    end;
+  end;
   GLoaded := True;
 end;
 

@@ -11,6 +11,7 @@ program jevban;
 
 uses
   {$IFDEF UNIX}cthreads, BaseUnix,{$ENDIF}
+  {$IFDEF WINDOWS}Windows,{$ENDIF}
   SysUtils, Classes,
   Ban.Config, Ban.Tail, Ban.Engine, Ban.Jev;
 
@@ -108,8 +109,26 @@ begin
     Engine.EvalReport(Cfg.EvalJson);
 end;
 
+{ the model may use every core; the web server should still come first }
+procedure LowerPriority;
+begin
+  if Cfg.Nice <= 0 then
+    Exit;
+  {$IFDEF UNIX}
+  { setpriority, not FpNice: x86-64 Linux has no nice syscall, and FPC 3.2.2's
+    FpNice fails there with EINVAL. Threads started later (the decider worker,
+    llama.cpp's pool) inherit it }
+  if FpSetPriority(0, 0, Cfg.Nice) <> 0 then
+    WriteLn(StdErr, 'jevban: could not lower the priority (errno ', FpGetErrno, ')');
+  {$ENDIF}
+  {$IFDEF WINDOWS}
+  SetPriorityClass(GetCurrentProcess, BELOW_NORMAL_PRIORITY_CLASS);
+  {$ENDIF}
+end;
+
 procedure RunDaemon;
 begin
+  LowerPriority;
   Engine.Start;
   Engine.InitDecider;
   Engine.Log(Format('following %s; decider %s; action %s%s', [Tailer.FileNames, Engine.Describe, Cfg.ActionType,

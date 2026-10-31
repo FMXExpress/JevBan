@@ -51,7 +51,8 @@ type
   { a flagged request waiting for the decider }
   TPendingLine = class
   public
-    Summary: string;
+    Summary: string;         { for the log }
+    ModelText: string;       { for the decider (CompactSummary) }
     Tags: string;
     Score: Integer;
     Truth: Integer;
@@ -84,7 +85,8 @@ type
   public
     IpText: string;
     Ip: TIpAddr;
-    Recent: TStringList;     { request summaries, oldest first }
+    Recent: TStringList;     { compact request lines for the decider, oldest first }
+    Agent: string;           { the user agent it came with first }
     Strikes: array of Int64;
     LastSeen: Int64;
     FloodStart: Int64;
@@ -92,6 +94,9 @@ type
     VerdictAt: Int64;        { 0 = no verdict yet }
     VerdictMal: Double;
     VerdictIntent: string;
+    JudgedTags: TStringList; { signature tags the decider has seen from this client }
+    JudgedCount: Integer;    { flagged requests the decider has judged }
+    SinceVerdict: Integer;   { flagged requests since, covered by a reused pass }
     Pending: TFPObjectList;  { TPendingLine waiting for the batch }
     PendingTags: TStringList;  { all tags of the pending requests (sent to the decider) }
     PendingSince: Int64;
@@ -178,8 +183,10 @@ type
     { one labelled request decided: rules alone, and the live pipeline }
     procedure CountEval(ATruth: Integer; const ACategory: string; ARulesStrike, ALiveStrike: Boolean);
     function GetClient(const E: TAccessEntry; ANow: Int64): TClient;
-    procedure Judge(C: TClient; const ASummary, ATags: string; AScore, ATruth: Integer;
+    procedure Judge(C: TClient; const ASummary, AModelText, ATags: string; AScore, ATruth: Integer;
       const ACategory: string; ANow: Int64);
+    { a fresh verdict, or a pass that still covers what the client is doing }
+    function VerdictReusable(C: TClient; const ATags: string; ANow: Int64): Boolean;
     { the one place a flagged request is decided. AMal < 0: no model verdict
       (rules mode, a hard rule, the decider unavailable) }
     procedure Decide(C: TClient; const ASummary, ATags: string; AScore, ATruth: Integer;
@@ -228,6 +235,9 @@ constructor TClient.Create;
 begin
   inherited Create;
   Recent := TStringList.Create;
+  JudgedTags := TStringList.Create;
+  JudgedTags.Sorted := True;
+  JudgedTags.Duplicates := dupIgnore;
   Pending := TFPObjectList.Create(True);
   PendingTags := TStringList.Create;
 end;
@@ -236,6 +246,7 @@ destructor TClient.Destroy;
 begin
   PendingTags.Free;
   Pending.Free;
+  JudgedTags.Free;
   Recent.Free;
   inherited Destroy;
 end;
@@ -527,7 +538,7 @@ var
   LNow: Int64;
   LTags: TStringList;
   LScore, I, LDist: Integer;
-  LSummary, LPath, LNear: string;
+  LSummary, LModelLine, LPath, LNear: string;
   LEval: TEvalClient;
 begin
   Inc(Stats.Lines);
@@ -586,6 +597,9 @@ begin
   C := GetClient(E, LNow);
   C.LastSeen := LNow;
   LSummary := EntrySummary(E);
+  if C.Agent = '' then
+    C.Agent := E.Agent;
+  LModelLine := CompactSummary(E, C.Agent);
   LTags := TStringList.Create;
   try
     LTags.Duplicates := dupIgnore;
@@ -639,7 +653,7 @@ begin
     if LScore >= FCfg.SuspiciousScore then
     begin
       Inc(Stats.Suspicious);
-      Judge(C, LSummary, LTags.CommaText, LScore, ATruth, ACategory, LNow);
+      Judge(C, LSummary, LModelLine, LTags.CommaText, LScore, ATruth, ACategory, LNow);
     end
     else
       { not flagged: neither rules nor model strike }
@@ -647,7 +661,7 @@ begin
   finally
     LTags.Free;
   end;
-  C.Recent.Add(LSummary);
+  C.Recent.Add(LModelLine);
   while C.Recent.Count > FCfg.ContextLines do
     C.Recent.Delete(0);
   MaybeFlush(LNow);
@@ -661,7 +675,42 @@ begin
   Result := (I >= 0) and TBanRecord(FBans.Objects[I]).Active;
 end;
 
-procedure TBanEngine.Judge(C: TClient; const ASummary, ATags: string; AScore, ATruth: Integer;
+function TBanEngine.VerdictReusable(C: TClient; const ATags: string; ANow: Int64): Boolean;
+var
+  LTags: TStringList;
+  LTag: string;
+begin
+  Result := False;
+  if (C.VerdictAt = 0) or C.Queued or C.InFlight then
+    Exit;
+  (* only a pass is reused. A strike is decided on the latest evidence: reusing
+     one let a single early verdict count as all maxretry strikes (a site owner
+     judged on its first two login requests, p=0.80, was banned when it opened
+     /wp-admin/ a few seconds later) *)
+  if C.VerdictMal >= FCfg.Threshold then
+    Exit;
+  if ANow - C.VerdictAt < FCfg.CacheSecs then
+    Exit(True);
+  (* a pass, for longer: an uptime monitor flagged for its user agent every five
+     minutes need not be asked every five minutes. Not if the client does
+     something new (a tag the decider has not seen from it), nor once it has
+     sent as many flagged requests again as were judged (at least 3): a password
+     guesser that looked harmless after two posts is asked again with more *)
+  if (ANow - C.VerdictAt >= FCfg.CachePassSecs) or (C.SinceVerdict >= Max(3, C.JudgedCount)) then
+    Exit;
+  LTags := TStringList.Create;
+  try
+    LTags.CommaText := ATags;
+    for LTag in LTags do
+      if C.JudgedTags.IndexOf(LTag) < 0 then
+        Exit;
+  finally
+    LTags.Free;
+  end;
+  Result := True;
+end;
+
+procedure TBanEngine.Judge(C: TClient; const ASummary, AModelText, ATags: string; AScore, ATruth: Integer;
   const ACategory: string; ANow: Int64);
 var
   LLine: TPendingLine;
@@ -680,8 +729,9 @@ begin
     Decide(C, ASummary, ATags, AScore, ATruth, ACategory, -1, '', 'hard rule', ANow);
     Exit;
   end;
-  if (C.VerdictAt > 0) and (ANow - C.VerdictAt < FCfg.CacheSecs) and not C.Queued and not C.InFlight then
+  if VerdictReusable(C, ATags, ANow) then
   begin
+    Inc(C.SinceVerdict);
     Decide(C, ASummary, ATags, AScore, ATruth, ACategory, C.VerdictMal, C.VerdictIntent,
       FCfg.Mode + ' (cached)', ANow);
     Exit;
@@ -695,6 +745,7 @@ begin
   end;
   LLine := TPendingLine.Create;
   LLine.Summary := ASummary;
+  LLine.ModelText := AModelText;
   LLine.Tags := ATags;
   LLine.Score := AScore;
   LLine.Truth := ATruth;
@@ -843,10 +894,11 @@ begin
       LJob.Clients.Add(C);
       LItem := TJevItem.Create;
       LItem.Ip := C.IpText;
+      LItem.Agent := C.Agent;
       LItem.Hits := C.PendingTags.CommaText;
       { the model sees the latest flagged requests; all of them get its verdict }
       for J := Max(0, C.Pending.Count - 2 * FCfg.ContextLines) to C.Pending.Count - 1 do
-        LItem.Flagged.Add(TPendingLine(C.Pending[J]).Summary);
+        LItem.Flagged.Add(TPendingLine(C.Pending[J]).ModelText);
       for J := 0 to C.Recent.Count - 1 do
         if LItem.Flagged.IndexOf(C.Recent[J]) < 0 then
           LItem.Earlier.Add(C.Recent[J]);
@@ -928,6 +980,9 @@ begin
         C.VerdictAt := ANow;
         C.VerdictMal := LItem.Malicious;
         C.VerdictIntent := LItem.Intent;
+        C.JudgedTags.CommaText := C.JudgedTags.CommaText + ',' + LItem.Hits;
+        Inc(C.JudgedCount, LLines.Count);
+        C.SinceVerdict := 0;
       end;
       for J := 0 to LLines.Count - 1 do
       begin
@@ -1178,6 +1233,10 @@ begin
   WriteLn(Format('Model: %d hard-rule decisions without it, %d requests to it for %d clients, %d REVIEW, ' +
     '%.1f s wall clock', [Stats.HardRules, Stats.DeciderCalls, Stats.DeciderClients, Stats.Reviews,
     (Now - FEvalStart) * 86400]));
+  if (FDecider is TLocalJudge) and (TLocalJudge(FDecider).Prompts > 0) then
+    with TLocalJudge(FDecider) do
+      WriteLn(Format('  local model: %d prompts, %.0f tokens and %.1f s each on average (%.0f tokens/s)',
+        [Prompts, PromptTokens / Prompts, PromptMs / Prompts / 1000, PromptTokens / Max(1, PromptMs) * 1000]));
 
   if AJsonFile = '' then
     Exit;
@@ -1210,9 +1269,17 @@ begin
       LCats.Add(FEvalCats[I], LObj);
     end;
     LRoot.Add('categories', LCats);
-    LRoot.Add('model', TJSONObject.Create(['hard_rule_decisions', Stats.HardRules, 'requests', Stats.DeciderCalls,
+    LObj := TJSONObject.Create(['hard_rule_decisions', Stats.HardRules, 'requests', Stats.DeciderCalls,
       'clients', Stats.DeciderClients, 'errors', Stats.DeciderErrors, 'reviews', Stats.Reviews,
-      'wall_seconds', (Now - FEvalStart) * 86400]));
+      'wall_seconds', (Now - FEvalStart) * 86400]);
+    if FDecider is TLocalJudge then
+      with TLocalJudge(FDecider) do
+      begin
+        LObj.Add('prompts', Prompts);
+        LObj.Add('prompt_tokens', PromptTokens);
+        LObj.Add('prompt_ms', PromptMs);
+      end;
+    LRoot.Add('model', LObj);
     LText.Text := LRoot.FormatJSON;
     LText.SaveToFile(AJsonFile);
   finally

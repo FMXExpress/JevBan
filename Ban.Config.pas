@@ -37,6 +37,7 @@ type
     BuiltinSignatures: Boolean;
     SuspiciousScore: Integer; { prefilter score that sends a request to the decider }
     Verbose: Boolean;
+    Nice: Integer;            { the daemon's scheduling niceness (Unix), below-normal priority on Windows if > 0 }
     { [decider] }
     Mode: string;             { local (OpenJev in-process) | jev (a /v1/systemone server) | rules }
     LocalModel: string;       { flash-9b, flash-9b-q8, 27b, ... or a .gguf path }
@@ -54,6 +55,7 @@ type
     Threshold: Double;        { P(malicious) that counts as a strike }
     InstantThreshold: Double; { P(malicious) that bans at once }
     CacheSecs: Integer;       { reuse a client's verdict this long }
+    CachePassSecs: Integer;   { ... and a pass this long, while the client does nothing new }
     BatchInterval: Integer;   { flush the queue of flagged clients after this many seconds ... }
     BatchLines: Integer;      { ... or this many log lines ... }
     BatchClients: Integer;    { ... or when this many clients are queued (one request each flush) }
@@ -196,6 +198,7 @@ begin
   Flood4xx := 40;
   BuiltinSignatures := True;
   SuspiciousScore := 3;
+  Nice := 10;
   Mode := 'local';
   LocalModel := 'flash-9b';
   {$IFDEF WINDOWS}
@@ -217,6 +220,7 @@ begin
   Threshold := 0.80;
   InstantThreshold := 0.97;
   CacheSecs := 60;
+  CachePassSecs := 1800;
   BatchInterval := 5;
   BatchLines := 1000;
   BatchClients := 8;
@@ -388,6 +392,7 @@ begin
       BuiltinSignatures := LIni.ReadBool('jevban', 'builtin_signatures', BuiltinSignatures);
       SuspiciousScore := LIni.ReadInteger('jevban', 'suspicious_score', SuspiciousScore);
       Verbose := LIni.ReadBool('jevban', 'verbose', Verbose);
+      Nice := LIni.ReadInteger('jevban', 'nice', Nice);
 
       Mode := LowerCase(LIni.ReadString('decider', 'mode', Mode));
       Provider := LowerCase(Trim(LIni.ReadString('decider', 'provider', '')));
@@ -413,6 +418,7 @@ begin
       Threshold := F('threshold', Threshold);
       InstantThreshold := F('instant_threshold', InstantThreshold);
       CacheSecs := LIni.ReadInteger('decider', 'cache_secs', CacheSecs);
+      CachePassSecs := LIni.ReadInteger('decider', 'cache_pass_secs', CachePassSecs);
       BatchInterval := LIni.ReadInteger('decider', 'batch_interval', BatchInterval);
       BatchLines := LIni.ReadInteger('decider', 'batch_lines', BatchLines);
       BatchClients := LIni.ReadInteger('decider', 'batch_clients', BatchClients);
