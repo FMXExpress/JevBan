@@ -27,3 +27,23 @@ non-default field set unparsed; the cap is gone.
 held a handle on every one of them. Wildcard matches untouched for a day are now skipped, and
 a followed one that is fully read and idle for a day is let go; if it is written again it is
 picked up where it was, not replayed (checked: handle released, then reopened, no old lines).
+
+## Follow-up: the first header first
+
+The backward search ran on every file at startup, Apache logs included, reading all of a big
+file that has no header after its start. Now the first `#Fields:` (from the first 64 KB) is
+kept if the last line before the starting point parses with it (field count, client address,
+status 100–599); only otherwise is the file searched backwards, and the search stops at the
+first header it meets. A file with no `#Fields:` in its first 64 KB is not W3C and is not
+searched. Startup, measured from `/proc/<pid>/io` rchar:
+
+| 1 GB log | read at startup | new lines |
+|---|---|---|
+| IIS, header only at the top | 0.2 MB, 0.03 s | parsed, scanner banned |
+| IIS, fields changed at 3/4 | 257 MB, 0.09 s (back to the change) | parsed with the new fields |
+| IIS, ends in a fresh header block | 1.2 MB, 0.03 s | parsed with the new fields |
+| Apache | 0.1 MB, 0.03 s | parsed |
+
+Fields changed to another set with the same count and the address and status in the same
+columns would still pass the check; IIS's fields are chosen from one fixed list, so that takes
+a deliberate reshuffle.

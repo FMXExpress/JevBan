@@ -18,7 +18,7 @@ unit Ban.Tail;
 interface
 
 uses
-  SysUtils, Classes, StrUtils, Contnrs, Ban.LogFormats {$IFDEF UNIX}, BaseUnix{$ENDIF};
+  SysUtils, Classes, StrUtils, Contnrs, Ban.Apache, Ban.LogFormats {$IFDEF UNIX}, BaseUnix{$ENDIF};
 
 type
   TTailFile = class
@@ -41,10 +41,19 @@ type
     procedure SetLayout(const AFieldsLine: string);
     { forgets layouts that only lines already handed out (and processed) used }
     procedure Prune;
-    (* the last "#Fields:" line before AEnd, '' if none. IIS writes one at the
-       top of each file, so on a big file this reads it all, backwards, once
-       at startup: about a second per GB from the page cache *)
+    (* the last "#Fields:" line before AEnd, '' if none: a backward read that
+       stops at the first header it meets. StartLayout's fallback, for a file
+       whose logged fields changed since its first header *)
     function LastFieldsLine(AEnd: Int64): string;
+    (* the "#Fields:" line in effect at AEnd, for a file opened at its end; ''
+       for a file that is not W3C (no header in its first 64 KB). The first
+       header is almost always still the one in effect: IIS repeats the block
+       on every restart, but with other columns only on a day the logged
+       fields were changed. It is kept if the last line before AEnd parses with
+       it; only otherwise is the file searched backwards (LastFieldsLine) *)
+    function StartLayout(AEnd: Int64): string;
+    { reads up to ASize bytes at AFrom }
+    function ReadAt(AFrom: Int64; ASize: Integer): string;
   end;
 
   TLogTailer = class
@@ -136,6 +145,66 @@ begin
   Layouts.Add(Layout);
 end;
 
+function TTailFile.ReadAt(AFrom: Int64; ASize: Integer): string;
+var
+  LGot: Integer;
+begin
+  Result := '';
+  if (ASize <= 0) or (FileSeek(Handle, AFrom, fsFromBeginning) <> AFrom) then
+    Exit;
+  SetLength(Result, ASize);
+  LGot := FileRead(Handle, Result[1], ASize);
+  if LGot < 0 then
+    LGot := 0;
+  SetLength(Result, LGot);
+end;
+
+function TTailFile.StartLayout(AEnd: Int64): string;
+const
+  CHead = 65536;
+var
+  LHead, LTail, LLast: string;
+  P, I: Integer;
+  LFrom: Int64;
+  LLayout: TW3CLayout;
+  E: TAccessEntry;
+begin
+  Result := '';
+  LHead := ReadAt(0, CHead);
+  P := Pos('#Fields:', LHead);
+  while (P > 1) and (LHead[P - 1] <> #10) do
+    P := PosEx('#Fields:', LHead, P + 1);
+  if P = 0 then
+    Exit;   { not a W3C log }
+  I := PosEx(#10, LHead, P);
+  if I = 0 then
+    Exit(LastFieldsLine(AEnd));   { a header longer than 64 KB: no shortcut }
+  Result := TrimRight(Copy(LHead, P, I - P));
+  { the last whole line before AEnd }
+  if AEnd > CHead then LFrom := AEnd - CHead else LFrom := 0;
+  LTail := ReadAt(LFrom, AEnd - LFrom);
+  while (LTail <> '') and (LTail[Length(LTail)] in [#10, #13]) do
+    SetLength(LTail, Length(LTail) - 1);
+  I := Length(LTail);
+  while (I > 0) and (LTail[I] <> #10) do
+    Dec(I);
+  LLast := TrimRight(Copy(LTail, I + 1, MaxInt));
+  if (LLast = '') or ((I = 0) and (LFrom > 0)) then
+    Exit(LastFieldsLine(AEnd));
+  if LLast[1] = '#' then
+  begin
+    { the file ends in a header block: its #Fields, if any, is near }
+    Exit(LastFieldsLine(AEnd));
+  end;
+  LLayout := TW3CLayout.Create(Result);
+  try
+    if not (ParseW3CLine(LLast, LLayout, E) and (E.Status >= 100) and (E.Status <= 599)) then
+      Result := LastFieldsLine(AEnd);
+  finally
+    LLayout.Free;
+  end;
+end;
+
 procedure TTailFile.Prune;
 begin
   while (Layouts.Count > 0) and (Layouts[0] <> Layout) do
@@ -203,7 +272,7 @@ begin
   if AFromEnd then
   begin
     Position := FileSeek(Handle, Int64(0), fsFromEnd);
-    LFields := LastFieldsLine(Position);
+    LFields := StartLayout(Position);
     if LFields <> '' then
       SetLayout(LFields);
   end
