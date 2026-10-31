@@ -436,14 +436,26 @@ and any of the four commands can be overridden in `[action]` with tags such as `
   Behind a reverse proxy, log the real client address (`mod_remoteip`, nginx `real_ip`, IIS
   "X-Forwarded-For" as `c-ip` via the ARR helper).
 - **Memory:** about 1 GB more than the model file in local mode (~7 GB for Flash 9B); a few MB
-  with a hosted API or rules only.
-- **Speed:** the parser, signatures and known-bad paths handle about 16,000 lines a second on
-  one core with typical traffic, and about 7,500 in a flood where every line is a new address
-  (measured with `--test` on 200,000 lines). In local mode on a 4-core
-  CPU, Flash 9B reads about 20 prompt tokens a second, about 20 seconds per flagged client; batching, verdict caching and
-  hard rules keep the queue small, and the log is caught up afterwards. With a GPU, use
-  llama.cpp libraries built with CUDA or Vulkan (`llama_lib_dir`) and set `gpu_layers = 999`.
-  A hosted API answers in well under a second.
+  with a hosted API or rules only, plus about 1 KB per tracked client (`max_clients`, 20,000 by
+  default; 500,000 clients took under 500 MB).
+- **Speed** (`--test`, rules, one core): the parser, signatures and known-bad paths handle about
+  200,000 lines a second with typical traffic and about 35,000–60,000 in a flood where every
+  line is a new address, the same with 20,000 or 500,000 clients tracked. Signature and
+  near-miss results are cached per distinct URL, user agent and path (bounded), so repeated
+  traffic costs a lookup. IIS logs run at about 55,000 lines a second and JSON logs at about
+  20,000 (a full JSON parse per line).
+- **Ban storms:** firewall commands run on their own thread, and bans queued meanwhile go to
+  the firewall together: one `ipset restore`, `nft -f` or `iptables-restore` per batch. 2,000
+  addresses banned at once were all in the firewall within 0.2 s, with the log read without a
+  pause; one command per ban took 70–80 s. Restoring 1,000 bans at startup takes the same
+  single batch.
+- **The model under load:** in local mode on a 4-core CPU, Flash 9B reads about 20 prompt
+  tokens a second, about 20 seconds per flagged client; batching, verdict caching and hard
+  rules keep the queue small. When more batches wait than `decider_backlog` (4), new ones are
+  decided by the rules at once and their clients are offered to the model again with their
+  next flagged request, so a large attack never leaves clients waiting hours for a verdict.
+  With a GPU, use llama.cpp libraries built with CUDA or Vulkan (`llama_lib_dir`) and set
+  `gpu_layers = 999`. A hosted API answers in well under a second.
 
 ## Security notes
 

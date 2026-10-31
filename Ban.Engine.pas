@@ -93,22 +93,37 @@ type
     FloodCount: Integer;
     LoggedIn: Boolean;       { a login POST was answered with a redirect: it signed in }
     ScanStart: Int64;        { distinct 404 paths in the scan window }
-    ScanPaths: TStringList;
     ProbeStart: Int64;       { distinct 4xx file probes in the probe window }
-    ProbePaths: TStringList;
     VerdictAt: Int64;        { 0 = no verdict yet }
     VerdictMal: Double;
     VerdictIntent: string;
-    JudgedTags: TStringList; { signature tags the decider has seen from this client }
     JudgedCount: Integer;    { flagged requests the decider has judged }
     SinceVerdict: Integer;   { flagged requests since, covered by a reused pass }
-    Pending: TFPObjectList;  { TPendingLine waiting for the batch }
-    PendingTags: TStringList;  { all tags of the pending requests (sent to the decider) }
     PendingSince: Int64;
     Queued: Boolean;
     InFlight: Boolean;       { a batch with this client is with the decider }
+  private
+    (* created when first used: most clients are visitors that never 404, never
+       reach the decider and never queue, and a flood holds hundreds of
+       thousands of clients (1.5 KB each with every list made up front) *)
+    FScanPaths, FProbePaths, FJudgedTags, FPendingTags: TStringList;
+    FPending: TFPObjectList;
+    function GetScanPaths: TStringList;
+    function GetProbePaths: TStringList;
+    function GetJudgedTags: TStringList;
+    function GetPending: TFPObjectList;
+    function GetPendingTags: TStringList;
+  public
     constructor Create;
     destructor Destroy; override;
+    property ScanPaths: TStringList read GetScanPaths;
+    property ProbePaths: TStringList read GetProbePaths;
+    { signature tags the decider has seen from this client }
+    property JudgedTags: TStringList read GetJudgedTags;
+    { TPendingLine waiting for the batch; set to nil when a job takes them over }
+    property Pending: TFPObjectList read GetPending write FPending;
+    { all tags of the pending requests (sent to the decider) }
+    property PendingTags: TStringList read GetPendingTags;
   end;
 
   TBanRecord = class
@@ -169,7 +184,7 @@ type
   end;
 
   TBanStats = record
-    Lines, Parsed, Ignored, Suspicious, HardRules, DeciderCalls, DeciderClients, DeciderErrors,
+    Lines, Parsed, Ignored, Suspicious, HardRules, DeciderCalls, DeciderClients, DeciderErrors, DeciderBusy,
       Reviews, Strikes, Bans, Unbans: Int64;
   end;
 
@@ -179,6 +194,9 @@ type
     FSigs: TSignatureSet;
     FDecider: TDecider;      { nil in rules mode, or when the local model could not be loaded }
     FAction: TBanAction;
+    FActions: TActionWorker; { live daemon only: runs FAction off this thread }
+    FLogLock: TCriticalSection;
+    FLastSave: QWord;
     FClients: TStrMap;       { ip -> TClient (owned) }
     FPurgeNow: Int64;
     FBans: TStringList;      { ip -> TBanRecord }
@@ -188,6 +206,8 @@ type
     FLastErrLog: Int64;
     FErrsSinceLog: Integer;
     FDirty: Boolean;
+    FBusySinceLog: Integer;
+    FLastBusyLog: Int64;
     FLog: TFileStream;
     FQueue: TList;           { TClient waiting for the next batch, oldest first }
     FLinesSinceFlush: Integer;
@@ -231,6 +251,8 @@ type
     procedure DropClients(ALimit: Int64; AByLastSeen: Boolean);
     procedure LoadState;
     procedure SaveState;
+    procedure ActionBan(const AIp: TIpAddr; ASecs: Int64);
+    procedure ActionUnban(const AIp: TIpAddr);
   public
     Stats: TBanStats;
     constructor Create(ACfg: TBanConfig);
@@ -266,28 +288,59 @@ constructor TClient.Create;
 begin
   inherited Create;
   Recent := TStringList.Create;
-  ScanPaths := TStringList.Create;
-  ScanPaths.Sorted := True;
-  ScanPaths.Duplicates := dupIgnore;
-  ProbePaths := TStringList.Create;
-  ProbePaths.Sorted := True;
-  ProbePaths.Duplicates := dupIgnore;
-  JudgedTags := TStringList.Create;
-  JudgedTags.Sorted := True;
-  JudgedTags.Duplicates := dupIgnore;
-  Pending := TFPObjectList.Create(True);
-  PendingTags := TStringList.Create;
 end;
 
 destructor TClient.Destroy;
 begin
-  PendingTags.Free;
-  Pending.Free;
-  JudgedTags.Free;
-  ScanPaths.Free;
-  ProbePaths.Free;
+  FPendingTags.Free;
+  FPending.Free;
+  FJudgedTags.Free;
+  FScanPaths.Free;
+  FProbePaths.Free;
   Recent.Free;
   inherited Destroy;
+end;
+
+function SortedSet: TStringList;
+begin
+  Result := TStringList.Create;
+  Result.Sorted := True;
+  Result.Duplicates := dupIgnore;
+end;
+
+function TClient.GetScanPaths: TStringList;
+begin
+  if FScanPaths = nil then
+    FScanPaths := SortedSet;
+  Result := FScanPaths;
+end;
+
+function TClient.GetProbePaths: TStringList;
+begin
+  if FProbePaths = nil then
+    FProbePaths := SortedSet;
+  Result := FProbePaths;
+end;
+
+function TClient.GetJudgedTags: TStringList;
+begin
+  if FJudgedTags = nil then
+    FJudgedTags := SortedSet;
+  Result := FJudgedTags;
+end;
+
+function TClient.GetPending: TFPObjectList;
+begin
+  if FPending = nil then
+    FPending := TFPObjectList.Create(True);
+  Result := FPending;
+end;
+
+function TClient.GetPendingTags: TStringList;
+begin
+  if FPendingTags = nil then
+    FPendingTags := TStringList.Create;
+  Result := FPendingTags;
 end;
 
 { TNetHeat }
@@ -454,6 +507,7 @@ begin
   FEvalStart := Now;
   FStrikeCap := -1;
   FAction := TBanAction.Create(@Log);
+  FLogLock := TCriticalSection.Create;
   FAction.Kind := FCfg.ActionType;
   FAction.Name := FCfg.ActionName;
   FAction.Port := FCfg.Port;
@@ -491,7 +545,9 @@ begin
   FQueue.Free;
   FBans.Free;
   FClients.Free;
+  FreeAndNil(FActions);   { before the action it runs }
   FAction.Free;
+  FLogLock.Free;
   FDecider.Free;
   FSigs.Free;
   inherited Destroy;
@@ -502,13 +558,35 @@ var
   LLine: string;
 begin
   LLine := FormatDateTime('yyyy-mm-dd hh:nn:ss', Now) + ' jevban: ' + AMsg;
-  WriteLn(LLine);
-  System.Flush(Output);
-  if FLog <> nil then
-  begin
-    LLine := LLine + LineEnding;
-    FLog.WriteBuffer(LLine[1], Length(LLine));
+  { the action worker logs too }
+  FLogLock.Enter;
+  try
+    WriteLn(LLine);
+    System.Flush(Output);
+    if FLog <> nil then
+    begin
+      LLine := LLine + LineEnding;
+      FLog.WriteBuffer(LLine[1], Length(LLine));
+    end;
+  finally
+    FLogLock.Leave;
   end;
+end;
+
+procedure TBanEngine.ActionBan(const AIp: TIpAddr; ASecs: Int64);
+begin
+  if FActions <> nil then
+    FActions.Ban(AIp, ASecs)
+  else
+    FAction.Ban(AIp, ASecs);
+end;
+
+procedure TBanEngine.ActionUnban(const AIp: TIpAddr);
+begin
+  if FActions <> nil then
+    FActions.Unban(AIp)
+  else
+    FAction.Unban(AIp);
 end;
 
 procedure TBanEngine.EvictOldest(ACount: Integer);
@@ -1065,7 +1143,7 @@ begin
       LJob.Items.Add(LItem);
       { the job takes the client's pending requests }
       LJob.Lines.Add(C.Pending);
-      C.Pending := TFPObjectList.Create(True);
+      C.Pending := nil;   { the job owns them now; a new list when the next one comes }
       C.PendingTags.Clear;
       C.Queued := False;
     end;
@@ -1078,6 +1156,16 @@ begin
     if FMinuteCalls >= FCfg.MaxPerMinute then
     begin
       LJob.Error := 'rate limit';
+      ApplyJob(LJob, ANow);
+      Continue;
+    end;
+    (* backpressure: a local model on a CPU takes minutes per batch, and a large
+       attack queues batches far faster. Past the backlog the rules decide, as
+       past the rate limit, instead of clients waiting hours for a verdict
+       (held in memory, unevictable, their new lines held with them) *)
+    if (FWorker <> nil) and (FCfg.DeciderBacklog > 0) and (FWorker.Busy >= FCfg.DeciderBacklog) then
+    begin
+      LJob.Error := 'busy';
       ApplyJob(LJob, ANow);
       Continue;
     end;
@@ -1111,6 +1199,19 @@ begin
   try
     if AJob.Error = 'rate limit' then
       LHow := 'rules (decider rate limit)'
+    else if AJob.Error = 'busy' then
+    begin
+      LHow := 'rules (decider backlog full)';
+      Inc(Stats.DeciderBusy);
+      Inc(FBusySinceLog);
+      if UnixNow - FLastBusyLog >= 60 then
+      begin
+        Log(Format('decider busy: %d batch(es) decided by the rules since the last report (decider_backlog = %d)',
+          [FBusySinceLog, FCfg.DeciderBacklog]));
+        FLastBusyLog := UnixNow;
+        FBusySinceLog := 0;
+      end;
+    end
     else if AJob.Ok then
       LHow := Format('%s batch of %d, %dms', [FCfg.Mode, AJob.Items.Count, AJob.Ms])
     else
@@ -1432,7 +1533,7 @@ begin
     end;
     LRoot.Add('categories', LCats);
     LObj := TJSONObject.Create(['hard_rule_decisions', Stats.HardRules, 'requests', Stats.DeciderCalls,
-      'clients', Stats.DeciderClients, 'errors', Stats.DeciderErrors, 'reviews', Stats.Reviews,
+      'clients', Stats.DeciderClients, 'errors', Stats.DeciderErrors, 'busy', Stats.DeciderBusy, 'reviews', Stats.Reviews,
       'wall_seconds', (Now - FEvalStart) * 86400]);
     if FDecider is TLocalJudge then
       with TLocalJudge(FDecider) do
@@ -1585,9 +1686,10 @@ begin
   Log(Format('Ban %s for %ds (ban #%d): %s', [B.IpText, LSecs, B.Count, AReason]));
   if not FCfg.TestMode then
   begin
-    FAction.Ban(B.Ip, LSecs);
+    { the firewall call runs on the action worker; the state is saved by Tick,
+      at most once a second (rewriting it per ban was quadratic in a storm) }
+    ActionBan(B.Ip, LSecs);
     FDirty := True;
-    SaveState;
   end;
 end;
 
@@ -1664,14 +1766,17 @@ begin
       B.Active := False;
       Inc(Stats.Unbans);
       Log(Format('Unban %s', [B.IpText]));
-      FAction.Unban(B.Ip);
+      ActionUnban(B.Ip);
       FDirty := True;
     end;
   end;
   if LNow - FLastPurge >= 60 then
     Purge(LNow);
-  if FDirty then
+  if FDirty and (GetTickCount64 - FLastSave >= 1000) then
+  begin
     SaveState;
+    FLastSave := GetTickCount64;
+  end;
 end;
 
 procedure TBanEngine.LoadState;
@@ -1784,6 +1889,8 @@ var
 begin
   LoadState;
   FAction.Start;
+  if not FCfg.TestMode then
+    FActions := TActionWorker.Create(FAction);
   LNow := UnixNow;
   LRestored := 0;
   for I := 0 to FBans.Count - 1 do
@@ -1793,7 +1900,7 @@ begin
       Continue;
     if B.Expires > LNow then
     begin
-      FAction.Ban(B.Ip, B.Expires - LNow);
+      ActionBan(B.Ip, B.Expires - LNow);   { thousands of them go in one batch }
       Inc(LRestored);
     end
     else
@@ -1803,7 +1910,7 @@ begin
       { a chain-based action was just flushed by actionstart; others keep
         their rules across our restart and need the unban }
       if FAction.StartCmd = '' then
-        FAction.Unban(B.Ip);
+        ActionUnban(B.Ip);
       Log(Format('Unban %s (expired while stopped)', [B.IpText]));
     end;
   end;
@@ -1824,6 +1931,8 @@ begin
   end
   else
     FlushAll;
+  { the queued firewall calls run before the state is saved and actionstop }
+  FreeAndNil(FActions);
   SaveState;
   if FCfg.CleanupOnExit then
     FAction.Stop;
