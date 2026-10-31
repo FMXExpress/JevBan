@@ -11,7 +11,7 @@ unit Ban.Config;
 interface
 
 uses
-  SysUtils, Classes, Math, IniFiles, {$IFDEF UNIX}BaseUnix,{$ENDIF} Ban.Net;
+  SysUtils, Classes, Math, IniFiles, Ban.Net;
 
 type
   TBanConfig = class
@@ -199,8 +199,7 @@ begin
   {$IFDEF WINDOWS}
   ModelDir := ExtractFilePath(ParamStr(0)) + 'models';
   {$ELSE}
-  { the uid, not $USER: systemd sets no USER for a root service }
-  if FpGetUid = 0 then
+  if GetEnvironmentVariable('USER') = 'root' then
     ModelDir := '/var/lib/jevban/models'
   else
     ModelDir := IncludeTrailingPathDelimiter(GetUserDir) + '.cache/jevban/models';
