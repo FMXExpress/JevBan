@@ -116,7 +116,8 @@ type
   end;
 
 const
-  CVersion = '1.0.0';
+  { written by the release workflow from the version it publishes; 'dev' in a local build }
+  {$I version.inc}
   { from each provider's own documentation (October 2026); all take the Jev request
     body and Authorization: Bearer <key> }
   CProviders: array[0..6] of TProviderInfo = (
