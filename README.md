@@ -221,6 +221,12 @@ A rate-limited request (HTTP 429, from any provider) is retried after the wait t
 names, up to six times, before the rules decide; on Gemini's free tier (50,000 input tokens a
 minute) that is what keeps a busy batch with the model rather than the rules.
 
+Gemini's probabilities run lower than OpenJev's for some real attackers, so the preset strikes at
+0.50 and logs REVIEW from 0.30 (chosen on the benchmark's dev splits; `threshold =` and
+`review_threshold =` override them). On the held-out test splits it banned 1–2 more attackers
+per site than the rules alone (password guessers, stealth scanners) and no benign client, at
+about half a second per batch (`bench/results/iter9-gemini`).
+
 ### Your own server
 
 Any server that speaks the Jev request format works with `url =`, for example the OpenJev
