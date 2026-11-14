@@ -203,11 +203,22 @@ provider = typesafe          ; the key comes from api_key = or TYPESAFE_API_KEY
 | `digitalocean` | [DigitalOcean inference](https://docs.digitalocean.com/products/inference/how-to/use-system-one-api/) | `typesafe-jev-1.13.0` | `MODEL_ACCESS_KEY` | see provider |
 | `abacus` | [Abacus.AI RouteLLM](https://abacus.ai/help/route-llm/systemone) | `jev-latest` | `ABACUS_API_KEY` | $0.042 |
 | `vercel` | [Vercel AI Gateway](https://vercel.com/docs/ai-gateway/sdks-and-apis/typesafe) | `typesafe-ai/jev` | `AI_GATEWAY_API_KEY` | see provider |
+| `gemini` | [Google Decisions API](https://aistudio.google.com/docs/models/gemini-decision-1) | `gemini-decision-1` | `GEMINI_API_KEY` | $0.10 (free tier: 200 requests and 50,000 tokens a minute) |
 
 Output tokens are free with all of them. A flagged client costs roughly 500–800 input tokens,
 so 1,000 decisions cost a few cents. Endpoints and model names are from each provider's
-documentation (October 2026); `url =` and `model =` override them. Each endpoint has been
-checked to answer jevban's request; jevban has not yet been run against them with paid keys.
+documentation (October 2026; Gemini November 2026); `url =` and `model =` override them. Each
+endpoint has been checked to answer jevban's request; jevban has not yet been run against them
+with paid keys.
+
+`gemini` asks the same questions over Google's own request shape: the client state goes as the
+`input` text and the key in `x-goog-api-key` (`api = gemini` in `[decider]` selects that shape
+for a proxy in front of it). The Decisions API refuses a request whose text trips its safety
+filter, and a client can write such text into its user agent to send everyone it shares a batch
+with to the rules. So a refused batch is asked again one client at a time; a client refused on
+its own is logged as `REVIEW` (probability 0.5, intent `blocked_by_safety_filter`), not banned.
+The request shape is tested against a mock that checks it as Google documents it, not yet
+against the service itself.
 
 ### Your own server
 

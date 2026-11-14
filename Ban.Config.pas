@@ -59,6 +59,7 @@ type
     JevUrl: string;
     JevKey: string;
     JevModel: string;
+    JevWire: string;          { 'systemone' or 'gemini': from the provider, or api = in [decider] }
     TimeoutMs: Integer;
     Threshold: Double;        { P(malicious) that counts as a strike }
     InstantThreshold: Double; { P(malicious) that bans at once }
@@ -113,6 +114,7 @@ type
     KeyEnv: string;          { the variable the provider's docs use for the key }
     MaxQuestions: Integer;   { per request; 0 = no stated limit }
     MaxPerMinute: Integer;   { requests; 0 = no stated limit }
+    Wire: string;            { request format: 'systemone' or 'gemini' }
   end;
 
 const
@@ -120,21 +122,25 @@ const
   {$I version.inc}
   { from each provider's own documentation (October 2026); all take the Jev request
     body and Authorization: Bearer <key> }
-  CProviders: array[0..6] of TProviderInfo = (
+  CProviders: array[0..7] of TProviderInfo = (
     (Name: 'typesafe'; Url: 'https://api.typesafe.ai/v1/systemone'; Model: 'jev-latest';
-      KeyEnv: 'TYPESAFE_API_KEY'; MaxQuestions: 0; MaxPerMinute: 0),
+      KeyEnv: 'TYPESAFE_API_KEY'; MaxQuestions: 0; MaxPerMinute: 0; Wire: 'systemone'),
     (Name: 'perplexity'; Url: 'https://api.perplexity.ai/v1/decisions'; Model: 'pplx-decider-latest';
-      KeyEnv: 'PERPLEXITY_API_KEY'; MaxQuestions: 0; MaxPerMinute: 0),
+      KeyEnv: 'PERPLEXITY_API_KEY'; MaxQuestions: 0; MaxPerMinute: 0; Wire: 'systemone'),
     (Name: 'perplexity-flash'; Url: 'https://api.perplexity.ai/v1/decisions'; Model: 'pplx-decider-flash-latest';
-      KeyEnv: 'PERPLEXITY_API_KEY'; MaxQuestions: 0; MaxPerMinute: 0),
+      KeyEnv: 'PERPLEXITY_API_KEY'; MaxQuestions: 0; MaxPerMinute: 0; Wire: 'systemone'),
     (Name: 'liquid'; Url: 'https://api.liquid.ai/decisions/v1/systemone'; Model: 'd1.1';
-      KeyEnv: 'LIQUID_API_KEY'; MaxQuestions: 0; MaxPerMinute: 0),
+      KeyEnv: 'LIQUID_API_KEY'; MaxQuestions: 0; MaxPerMinute: 0; Wire: 'systemone'),
     (Name: 'digitalocean'; Url: 'https://inference.do-ai.run/v1/systemone'; Model: 'typesafe-jev-1.13.0';
-      KeyEnv: 'MODEL_ACCESS_KEY'; MaxQuestions: 0; MaxPerMinute: 0),
+      KeyEnv: 'MODEL_ACCESS_KEY'; MaxQuestions: 0; MaxPerMinute: 0; Wire: 'systemone'),
     (Name: 'abacus'; Url: 'https://routellm.abacus.ai/v1/systemone'; Model: 'jev-latest';
-      KeyEnv: 'ABACUS_API_KEY'; MaxQuestions: 10; MaxPerMinute: 20),
+      KeyEnv: 'ABACUS_API_KEY'; MaxQuestions: 10; MaxPerMinute: 20; Wire: 'systemone'),
     (Name: 'vercel'; Url: 'https://ai-gateway.vercel.sh/typesafe/v1/systemone'; Model: 'typesafe-ai/jev';
-      KeyEnv: 'AI_GATEWAY_API_KEY'; MaxQuestions: 0; MaxPerMinute: 0));
+      KeyEnv: 'AI_GATEWAY_API_KEY'; MaxQuestions: 0; MaxPerMinute: 0; Wire: 'systemone'),
+    { Google's Decisions API: the same questions, its own request shape (Ban.Jev); up to
+      1,000 questions a request, which the batch never comes near }
+    (Name: 'gemini'; Url: 'https://generativelanguage.googleapis.com/v1beta/decisions';
+      Model: 'gemini-decision-1'; KeyEnv: 'GEMINI_API_KEY'; MaxQuestions: 0; MaxPerMinute: 0; Wire: 'gemini'));
 
 implementation
 
@@ -184,7 +190,8 @@ begin
   WriteLn('      --version');
   WriteLn;
   WriteLn('environment: JEV_API_KEY or the provider''s own (TYPESAFE_API_KEY, PERPLEXITY_API_KEY,');
-  WriteLn('  LIQUID_API_KEY, MODEL_ACCESS_KEY, ABACUS_API_KEY, AI_GATEWAY_API_KEY), HTTPS_PROXY, NO_PROXY');
+  WriteLn('  LIQUID_API_KEY, MODEL_ACCESS_KEY, ABACUS_API_KEY, AI_GATEWAY_API_KEY, GEMINI_API_KEY),');
+  WriteLn('  HTTPS_PROXY, NO_PROXY');
 end;
 
 constructor TBanConfig.Create;
@@ -232,6 +239,7 @@ begin
   CtxTokens := 8192;
   NoulBias := NaN;
   JevUrl := 'http://127.0.0.1:3000/v1/systemone';
+  JevWire := 'systemone';
   JevModel := 'openjev';
   TimeoutMs := 8000;
   Threshold := 0.80;
@@ -436,6 +444,8 @@ begin
       NoulT := F('noul_t', NoulT);
       NoulBias := F('noul_bias', NoulBias);
       JevKey := LIni.ReadString('decider', 'api_key', JevKey);
+      { a proxy or gateway in front of the Decisions API: its request shape without the preset }
+      JevWire := LowerCase(Trim(LIni.ReadString('decider', 'api', JevWire)));
       LModelSet := Trim(LIni.ReadString('decider', 'model', '')) <> '';
       if LModelSet then
         JevModel := Trim(LIni.ReadString('decider', 'model', ''));
@@ -538,6 +548,7 @@ begin
         JevUrl := P.Url;
       if not AModelSet then
         JevModel := P.Model;
+      JevWire := P.Wire;
       if JevKey = '' then
         JevKey := GetEnvironmentVariable(P.KeyEnv);
       if P.MaxQuestions > 0 then
@@ -569,6 +580,8 @@ begin
     raise EArgumentException.Create('no log to follow: set logpath in [jevban] or pass --log');
   if (Mode <> 'local') and (Mode <> 'jev') and (Mode <> 'rules') then
     raise EArgumentException.CreateFmt('mode must be local, jev or rules, not "%s"', [Mode]);
+  if (JevWire <> 'systemone') and (JevWire <> 'gemini') then
+    raise EArgumentException.CreateFmt('api must be systemone or gemini, not "%s"', [JevWire]);
   { the hosted Jev API names its models jev-*; "openjev" is what the OpenJev helper ignores }
   if (Pos('api.typesafe.ai', LowerCase(JevUrl)) > 0) and (JevModel = 'openjev') then
     JevModel := 'jev-latest';

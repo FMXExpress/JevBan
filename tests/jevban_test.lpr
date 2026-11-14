@@ -427,6 +427,66 @@ begin
   end;
 end;
 
+procedure TestGeminiWire;
+var
+  C: TJevClient;
+  L: TList;
+  It: TJevItem;
+  R, LIn: TJSONObject;
+  LQ: TJSONObject;
+begin
+  C := TJevClient.Create;
+  L := TList.Create;
+  It := TJevItem.Create;
+  try
+    It.Ip := '203.0.113.9';
+    It.Agent := 'x "quoted"';
+    It.Hits := 'wordpress';
+    It.Flagged.Add('10:00:01 POST /wp-login.php HTTP/1.1 200 9');
+    L.Add(It);
+    C.Model := 'gemini-decision-1';
+    C.AskIntent := True;
+    C.Wire := 'gemini';
+    R := TJSONObject(GetJSON(C.BuildRequest(L)));
+    try
+      Check((R.Find('state') = nil) and (R.Find('input') <> nil) and (R.Find('input').JSONType = jtString),
+        'gemini: the state goes as "input" text');
+      LIn := TJSONObject(GetJSON(R.Strings['input']));
+      try
+        Check((LIn.Find('clients') <> nil) and (LIn.Objects['clients'].Find('203.0.113.9') <> nil) and
+          (LIn.Find('server') <> nil), 'gemini: input text is the state as JSON');
+        Check(TJSONObject(LIn.Objects['clients'].Items[0]).Strings['user_agent'] = 'x "quoted"',
+          'gemini: client text survives the JSON round trip');
+      finally
+        LIn.Free;
+      end;
+      LQ := R.Objects['questions'].Objects['c1'];
+      Check((LQ.Strings['type'] = 'noul') and (LQ.Objects['criteria'].Find('true_description') <> nil) and
+        (LQ.Objects['criteria'].Find('false_description') <> nil) and (LQ.Objects['criteria'].Find('true') = nil),
+        'gemini: noul criteria are true_description / false_description');
+      Check(Pos('clients["203.0.113.9"] in the input', LQ.Strings['instructions']) > 0,
+        'gemini: the question points into the input');
+      Check(R.Objects['questions'].Objects['i1'].Objects['criteria'].Find('credential_attack') <> nil,
+        'gemini: choice criteria map option ids to descriptions');
+    finally
+      R.Free;
+    end;
+    C.Wire := 'systemone';
+    R := TJSONObject(GetJSON(C.BuildRequest(L)));
+    try
+      Check((R.Find('state') <> nil) and (R.Find('input') = nil) and
+        (R.Objects['questions'].Objects['c1'].Objects['criteria'].Find('true') <> nil),
+        'systemone: request shape unchanged');
+    finally
+      R.Free;
+    end;
+  finally
+    It.Free;
+    L.Free;
+    C.Free;
+  end;
+end;
+
 procedure TestJev;
 var
   J: TJevClient;
@@ -600,6 +660,7 @@ begin
   TestSignatures;
   TestSignatureFile;
   TestJev;
+  TestGeminiWire;
   WriteLn(Format('%d checks, %d failed', [Checks, Failures]));
   if Failures > 0 then
     ExitCode := 1;

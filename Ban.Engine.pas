@@ -1324,6 +1324,7 @@ begin
     LJev.Question := FCfg.Question;
     LJev.TimeoutMs := FCfg.TimeoutMs;
     LJev.AskIntent := FCfg.AskIntent;
+    LJev.Wire := FCfg.JevWire;
     FDecider := LJev;
   end
   else if FCfg.Mode = 'local' then
