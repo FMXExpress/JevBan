@@ -19,6 +19,12 @@ unit Ban.Jev;
    and the answers come back as numbers, not free text:
      {"answers": {"c1": {"type": "noul", "noul": 0.97}, ..}}
 
+   The same questions go to Google's Decisions API (gemini-decision-1, Wire =
+   'gemini'), which differs only on the wire: the state is the request's
+   "input" as JSON text, a noul question's criteria are true_description and
+   false_description, the key goes in x-goog-api-key; the answers come back in
+   the same shape.
+
    Log lines are written by the attacker, so they go in as quoted data in the
    state, never into a question; the readout is a single option letter, so
    the worst a crafted line can do is argue for a lower probability. *)
@@ -54,6 +60,9 @@ type
   end;
 
   TJevClient = class(TDecider)
+  private
+    FBlocked: Boolean;   { the last Post was refused by the Decisions API's safety filter }
+    function Post(AItems: TList; out AError: string; out ALatencyMs: Int64): Boolean;
   public
     Url: string;
     ApiKey: string;
@@ -62,8 +71,10 @@ type
     Question: string;
     AskIntent: Boolean;      { a second question per client: twice the readouts }
     TimeoutMs: Integer;
+    Wire: string;            { 'systemone' (POST /v1/systemone) or 'gemini' (Decisions API) }
     constructor Create;
     function BuildRequest(AItems: TList): string;
+    function ClientRef(const AIp: string): string;
     function Decide(AItems: TList; out AError: string; out ALatencyMs: Int64): Boolean; override;
     function Describe: string; override;
   end;
@@ -126,6 +137,7 @@ begin
   Site := CDefaultSite;
   Question := CDefaultQuestion;
   TimeoutMs := 8000;
+  Wire := 'systemone';
 end;
 
 function StringsToJson(AList: TStrings): TJSONArray;
@@ -135,6 +147,15 @@ begin
   Result := TJSONArray.Create;
   for I := 0 to AList.Count - 1 do
     Result.Add(AList[I]);
+end;
+
+{ where the question points the model to its client in the shared context }
+function TJevClient.ClientRef(const AIp: string): string;
+begin
+  if Wire = 'gemini' then
+    Result := Format('clients["%s"] in the input', [AIp])
+  else
+    Result := Format('state.clients["%s"]', [AIp]);
 end;
 
 function TJevClient.BuildRequest(AItems: TList): string;
@@ -162,11 +183,19 @@ begin
 
       LQ := TJSONObject.Create;
       LQ.Add('type', 'noul');
-      LQ.Add('instructions', Format('%s Judge only client %s (state.clients["%s"]); the other ' +
-        'clients are separate cases.', [Question, LItem.Ip, LItem.Ip]));
+      LQ.Add('instructions', Format('%s Judge only client %s (%s); the other ' +
+        'clients are separate cases.', [Question, LItem.Ip, ClientRef(LItem.Ip)]));
       LCrit := TJSONObject.Create;
-      LCrit.Add('true', CYes);
-      LCrit.Add('false', CNo);
+      if Wire = 'gemini' then
+      begin
+        LCrit.Add('true_description', CYes);
+        LCrit.Add('false_description', CNo);
+      end
+      else
+      begin
+        LCrit.Add('true', CYes);
+        LCrit.Add('false', CNo);
+      end;
       LQ.Add('criteria', LCrit);
       LQuestions.Add('c' + IntToStr(I + 1), LQ);
 
@@ -174,7 +203,7 @@ begin
       begin
         LQ := TJSONObject.Create;
         LQ.Add('type', 'choice');
-        LQ.Add('instructions', Format('What is client %s (state.clients["%s"]) doing?', [LItem.Ip, LItem.Ip]));
+        LQ.Add('instructions', Format('What is client %s (%s) doing?', [LItem.Ip, ClientRef(LItem.Ip)]));
         LCrit := TJSONObject.Create;
         for J := 0 to High(CIntents) do
           LCrit.Add(CIntents[J, 0], CIntents[J, 1]);
@@ -183,7 +212,13 @@ begin
       end;
     end;
     LState.Add('clients', LClients);
-    LRoot.Add('state', LState);
+    if Wire = 'gemini' then
+      { the input is text: the same state, as JSON }
+      LRoot.Add('input', LState.FormatJSON([foSingleLineArray, foSingleLineObject, foSkipWhiteSpace]))
+    else
+      LRoot.Add('state', LState);
+    if Wire = 'gemini' then
+      LState.Free;
     LRoot.Add('questions', LQuestions);
     Result := LRoot.AsJSON;
   finally
@@ -240,17 +275,90 @@ begin
   Result := Format('%s at %s', [Model, Url]);
 end;
 
+{ the Decisions API's content blocks (HTTP 400, error.code); a malformed request is not one }
+function IsSafetyBlock(AStatus: Integer; const ABody: string): Boolean;
+var
+  LData: TJSONData;
+  LCode: string;
+begin
+  Result := False;
+  if AStatus <> 400 then
+    Exit;
+  try
+    LData := GetJSON(ABody);
+  except
+    Exit;
+  end;
+  try
+    LCode := LData.FindPath('error.code').AsString;
+    Result := (LCode = 'safety') or (LCode = 'prohibited_content') or (LCode = 'blocklist') or
+      (LCode = 'image_safety') or (LCode = 'content_blocked');
+  except
+    Result := False;
+  end;
+  LData.Free;
+end;
+
 function TJevClient.Decide(AItems: TList; out AError: string; out ALatencyMs: Int64): Boolean;
+var
+  LOne: TList;
+  I: Integer;
+  LItem: TJevItem;
+  LErr: string;
+  LMs: Int64;
+begin
+  Result := Post(AItems, AError, ALatencyMs);
+  if Result or not FBlocked or (AItems.Count < 2) then
+    Exit;
+  (* one client's text tripped the safety filter and the whole batch was refused:
+     a way for an attacker to send everyone it shares a batch with to the rules.
+     Ask again one client at a time; one refused even alone is put at 0.5, the
+     REVIEW band (logged for an audit, not a strike) *)
+  Result := True;
+  AError := '';
+  LOne := TList.Create;
+  try
+    for I := 0 to AItems.Count - 1 do
+    begin
+      if DeciderAbort then
+      begin
+        AError := 'stopping';
+        Exit(False);
+      end;
+      LItem := TJevItem(AItems[I]);
+      LOne.Clear;
+      LOne.Add(LItem);
+      if not Post(LOne, LErr, LMs) then
+      begin
+        if not FBlocked then
+        begin
+          AError := LErr;
+          Exit(False);
+        end;
+        LItem.Malicious := 0.5;
+        LItem.Intent := 'blocked_by_safety_filter';
+      end;
+      Inc(ALatencyMs, LMs);
+    end;
+  finally
+    LOne.Free;
+  end;
+end;
+
+function TJevClient.Post(AItems: TList; out AError: string; out ALatencyMs: Int64): Boolean;
 var
   LBody, LResp: string;
   LStatus: Integer;
   LStart: TDateTime;
 begin
   Result := False;
+  FBlocked := False;
   LBody := BuildRequest(AItems);
   LStart := Now;
   try
-    if ApiKey <> '' then
+    if (ApiKey <> '') and (Wire = 'gemini') then
+      LResp := HttpPostJson(Url, LBody, ['x-goog-api-key', ApiKey, 'User-Agent', 'jevban/1.0'], TimeoutMs, LStatus)
+    else if ApiKey <> '' then
       LResp := HttpPostJson(Url, LBody, ['Authorization', 'Bearer ' + ApiKey, 'User-Agent', 'jevban/1.0'],
         TimeoutMs, LStatus)
     else
@@ -265,7 +373,10 @@ begin
   end;
   ALatencyMs := MilliSecondsBetween(Now, LStart);
   if LStatus <> 200 then
-    AError := Format('HTTP %d: %s', [LStatus, Copy(LResp, 1, 160)])
+  begin
+    AError := Format('HTTP %d: %s', [LStatus, Copy(LResp, 1, 160)]);
+    FBlocked := (Wire = 'gemini') and IsSafetyBlock(LStatus, LResp);
+  end
   else
     Result := ParseJevResponse(LResp, AItems, AError);
 end;

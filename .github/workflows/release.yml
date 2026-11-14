@@ -70,6 +70,10 @@ jobs:
           ./build/jevban --test tests/sample_access.log --jev-url http://127.0.0.1:3000/v1/systemone | tee out.txt
           grep -q "Ban 192.0.2.44" out.txt
           ! grep -q "Ban 198.51.100.7" out.txt
+          # the gemini provider's request shape, against the mock checking it as the documentation states
+          printf '[decider]\nprovider = gemini\nurl = http://127.0.0.1:3000/v1beta/decisions\napi_key = ci\n' > gemini.ini
+          ./build/jevban -c gemini.ini --test tests/sample_access.log | tee out.txt
+          grep -q "198.51.100.7 pass .* via jev batch" out.txt
       - name: Package
         run: |
           OUT="jevban-$VERSION-linux-x64"
