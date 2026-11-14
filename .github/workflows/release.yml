@@ -42,6 +42,8 @@ jobs:
           elif [[ "$GITHUB_REF" == refs/tags/v* ]]; then V="${GITHUB_REF_NAME#v}"
           else V="dev-${GITHUB_SHA::7}"; fi
           echo "VERSION=$V" >> "$GITHUB_ENV"
+          # jevban --version reports it (Ban.Config.pas includes this file)
+          printf "CVersion = '%s';\n" "$V" > version.inc
       - name: Toolchain
         run: sudo apt-get update && sudo apt-get install -y fpc cmake
       - name: llama.cpp (portable CPU build)
@@ -58,7 +60,9 @@ jobs:
           cmake --build llama.cpp/build -j"$(nproc)" --target llama $VARIANTS
           ls llama.cpp/build/bin
       - name: Build and test
-        run: make test
+        run: |
+          make test
+          ./build/jevban --version | grep -F "jevban $VERSION"
       - name: End to end against the mock decider
         run: |
           python3 tests/mock_jev.py 3000 &
@@ -105,6 +109,8 @@ jobs:
           elif [[ "$GITHUB_REF" == refs/tags/v* ]]; then V="${GITHUB_REF_NAME#v}"
           else V="dev-${GITHUB_SHA::7}"; fi
           echo "VERSION=$V" >> "$GITHUB_ENV"
+          # jevban --version reports it (Ban.Config.pas includes this file)
+          printf "CVersion = '%s';\n" "$V" > version.inc
       - name: Free Pascal (Lazarus ships FPC 3.2.2 for win64)
         shell: pwsh
         run: |
@@ -120,6 +126,7 @@ jobs:
           "$FPC" -O2 -Sh -vewn -Fu. -FUbuild/units -obuild/jevban_test.exe tests/jevban_test.lpr
           cp tests/sample_access.log data/badpaths.txt build/
           ./build/jevban_test.exe
+          ./build/jevban.exe --version | grep -F "jevban $VERSION"
           ./build/jevban.exe --test tests/sample_access.log --mode rules | tee out.txt
           grep -q "Ban 192.0.2.44" out.txt
       - name: llama.cpp (portable CPU build)
