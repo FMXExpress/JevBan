@@ -99,7 +99,8 @@ type
     constructor Create;
     destructor Destroy; override;
     { fills url, model and the key from Provider where the config left them unset }
-    procedure ApplyProvider(AUrlSet, AModelSet, AThresholdSet, AReviewSet: Boolean);
+    procedure ApplyProvider(AUrlSet, AModelSet: Boolean; AThresholdSet: Boolean = False;
+      AReviewSet: Boolean = False);
     { parses the command line; raises EArgumentException on a bad option.
       Returns False when --help/--version printed and the program should exit }
     function Load: Boolean;
