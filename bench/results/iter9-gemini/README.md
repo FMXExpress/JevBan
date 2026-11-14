@@ -23,6 +23,22 @@ most attackers 0.8–0.99, with a few password guessers, stealth scanners and a 
 once at those settings. On LogarX, 22 clients fell in the REVIEW band (p 0.30–0.47): 3
 reconnaissance attackers and 19 benign crawlers, API clients and browsers; none was banned.
 
+**Against OpenJev Flash 9B on the same build** (local, 4-core CPU, threshold 0.80;
+`flash-*.json`):
+
+| Split | Benign banned (Gemini / Flash) | Attackers (rules / Gemini 0.50 / Flash) | Requests through (Gemini / Flash) | Wall clock (Gemini / Flash) |
+|---|---|---|---|---|
+| WordPress | 0 / 0 | 44 / 46 / 47 | 175 / 179 | 128 s / 26 min |
+| Static site | **0 / 1** | 48 / 49 / 49 | 160 / 164 | 18 s / 7.5 min |
+| Web app | 0 / 0 | 43 / 44 / 44 | 214 / 239 | 100 s / 12 min |
+
+Flash banned one benign client on the static site: an uptime monitor (`Go-http-client`, `GET /`
+every five minutes, 200) that it scored 0.80–0.84 on five separate requests, each a fresh
+verdict and so a strike of its own; the site description mentions a monitor that uses curl.
+Gemini scored it low. jevban has no guard against a model striking a client whose only flagged
+trait is its user agent on successful page loads; that is the next thing to fix, separately.
+Flash caught one more password guesser on WordPress; otherwise the two ban the same attackers.
+
 **Speed and cost.** 18–223 s per split, about 0.4–0.5 s per batch; the local Flash 9B on a
 4-core CPU takes 14–48 minutes per split. The free tier's 50,000 input tokens a minute was the
 limit: the first run sent 18–111 batches per split to the rules on HTTP 429, which jevban now

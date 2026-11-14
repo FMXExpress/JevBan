@@ -225,7 +225,8 @@ Gemini's probabilities run lower than OpenJev's for some real attackers, so the 
 0.50 and logs REVIEW from 0.30 (chosen on the benchmark's dev splits; `threshold =` and
 `review_threshold =` override them). On the held-out test splits it banned 1–2 more attackers
 per site than the rules alone (password guessers, stealth scanners) and no benign client, at
-about half a second per batch (`bench/results/iter9-gemini`).
+about half a second per batch, close to the local Flash 9B (which on the same build banned one
+benign uptime monitor; `bench/results/iter9-gemini`).
 
 ### Your own server
 
