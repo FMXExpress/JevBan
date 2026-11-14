@@ -91,6 +91,9 @@ type
     TestMode: Boolean;
     EvalMode: Boolean;        { --eval: TestMode on a labelled log }
     EvalJson: string;         { --eval-json: the eval counts as JSON too }
+    DigestMode: Boolean;      { --digest: TestMode, writing a report for review }
+    DigestOut: string;        { --out: where the report goes ('' = standard output) }
+    DigestTokens: Integer;    { --digest-tokens: the report's size limit, estimated }
     ListBans: Boolean;
     constructor Create;
     destructor Destroy; override;
@@ -166,6 +169,11 @@ begin
   WriteLn('      --eval FILE        replay a labelled log ("attack<TAB>line" / "benign<TAB>line") and count');
   WriteLn('                         the strike decisions of the signatures and of the live pipeline');
   WriteLn('      --eval-json FILE   write the --eval counts to FILE as JSON too');
+  WriteLn('      --digest FILE      replay FILE through the rules and write a review report of the flagged');
+  WriteLn('                         clients and the 4xx paths no rule flagged, sized for one large-context');
+  WriteLn('                         model request (bans nothing; -m sets the decider, rules by default)');
+  WriteLn('  -o, --out FILE         write the --digest report to FILE (default: standard output)');
+  WriteLn('      --digest-tokens N  the report''s size limit in tokens, estimated (default 200000)');
   WriteLn('      --shadow           ask the model and log its verdicts, but let the signatures ban');
   WriteLn('  -n, --dry-run          log the firewall commands instead of running them');
   WriteLn('  -m, --mode MODE        local (OpenJev in-process, the default) | jev (a /v1/systemone server)');
@@ -242,6 +250,7 @@ begin
   BatchLines := 1000;
   BatchClients := 8;
   MaxPerMinute := 120;
+  DigestTokens := 200000;
   DeciderBacklog := 4;
   OnError := 'rules';
   RulesMinScore := 6;
@@ -366,6 +375,19 @@ begin
       end
       else if LArg = '--eval-json' then
         EvalJson := NextVal
+      else if LArg = '--digest' then
+      begin
+        LCliLogs.Add(NextVal);
+        TestMode := True;
+        DigestMode := True;
+        { the rules alone unless --mode says otherwise (it may come later and wins) }
+        if LCli.Values['mode'] = '' then
+          LCli.Values['mode'] := 'rules';
+      end
+      else if (LArg = '-o') or (LArg = '--out') then
+        DigestOut := NextVal
+      else if LArg = '--digest-tokens' then
+        DigestTokens := StrToIntDef(NextVal, DigestTokens)
       else if LArg = '--shadow' then
         LCli.Values['shadow'] := '1'
       else if LArg = '--list' then

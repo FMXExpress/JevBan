@@ -75,6 +75,29 @@ begin
   Result := Copy(ALine, LTab + 1, MaxInt);
 end;
 
+procedure WriteDigest;
+var
+  LText: string;
+  F: TFileStream;
+begin
+  LText := Engine.DigestReport(Tailer.FileNames);
+  if Cfg.DigestOut = '' then
+    Write(LText)
+  else
+  begin
+    F := TFileStream.Create(Cfg.DigestOut, fmCreate);
+    try
+      if LText <> '' then
+        F.WriteBuffer(LText[1], Length(LText));
+    finally
+      F.Free;
+    end;
+  end;
+  { to standard error, so a report on standard output stays clean }
+  WriteLn(StdErr, Format('jevban: digest of %s, %d characters (about %d tokens)%s', [Tailer.FileNames,
+    Length(LText), Round(Length(LText) / 3.5), BoolToStr(Cfg.DigestOut <> '', ' -> ' + Cfg.DigestOut, '')]));
+end;
+
 procedure RunTest;
 var
   I, LTruth: Integer;
@@ -108,6 +131,8 @@ begin
   Engine.Log(Engine.Summary);
   if Cfg.EvalMode then
     Engine.EvalReport(Cfg.EvalJson);
+  if Cfg.DigestMode then
+    WriteDigest;
 end;
 
 { the model may use every core; the web server should still come first }

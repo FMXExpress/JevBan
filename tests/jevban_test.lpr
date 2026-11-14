@@ -8,7 +8,7 @@ program jevban_test;
 
 uses
   SysUtils, Classes, Math, fpjson, jsonparser,
-  Ban.Net, Ban.Apache, Ban.Signatures, Ban.Jev, Ban.Local, Ban.Config, Ban.BadPaths, Ban.LogFormats, Ban.Tail, Ban.Hash;
+  Ban.Net, Ban.Apache, Ban.Signatures, Ban.Jev, Ban.Local, Ban.Config, Ban.BadPaths, Ban.LogFormats, Ban.Tail, Ban.Hash, Ban.Digest;
 
 var
   Failures: Integer = 0;
@@ -343,6 +343,52 @@ begin
   Check(LBad = 0, 'apache escape: empty and plain text unchanged');
 end;
 
+procedure TestDigest;
+var
+  D: TDigest;
+  LCtx: TStringList;
+  R: string;
+  I: Integer;
+begin
+  D := TDigest.Create;
+  LCtx := TStringList.Create;
+  try
+    LCtx.Add('10:00:00 GET / HTTP/1.1 200 10');
+    { a visitor nothing flags, then a common tag on many clients, then a rare one }
+    D.Add('198.51.100.9', 'ua', 1793440800, '10:00:00 GET / HTTP/1.1 200 10', '', 0, False, nil);
+    for I := 1 to 5 do
+      D.Add('198.51.100.' + IntToStr(I), 'ua', 1793440801, '10:00:01 GET /wp-login.php HTTP/1.1 200 9',
+        'wordpress', 3, True, nil);
+    D.Add('203.0.113.7', 'ua', 1793440802, '10:00:02 GET /Admin.asp HTTP/1.1 404 9', 'file-probe', 3, True, LCtx);
+    D.Add('203.0.113.7', 'ua', 1793440803, '10:00:03 GET /about HTTP/1.1 200 9', '', 0, False, nil);
+    D.Add('192.0.2.1', 'sqlmap', 1793440804, '10:00:04 GET /?id=1 HTTP/1.1 200 9', 'sqli,scanner-agent', 20, True, nil);
+    D.Banned('192.0.2.1', 'sqli,scanner-agent, score 20');
+    D.AfterBan('192.0.2.1');
+    D.AddMiss('198.51.100.20', '/old-page', 404);
+    D.AddMiss('198.51.100.21', '/old-page', 404);
+    D.AddMiss('198.51.100.20', '/favicon.ico', 404);
+    D.AddMiss('198.51.100.21', '/favicon.ico', 404);
+    R := D.Report(200000, 'A blog.', 'access.log');
+    Check(Pos('### 198.51.100.9', R) = 0, 'digest: an unflagged client is not in it');
+    Check((Pos('### 203.0.113.7', R) > 0) and (Pos('### 203.0.113.7', R) < Pos('### 198.51.100.1', R)),
+      'digest: a rare tag ranks before a common one at the same score');
+    Check(Pos('### 192.0.2.1', R) > Pos('## Banned by the rules', R), 'digest: banned clients come after');
+    Check(Pos('- tags: file-probe' + LineEnding, R) > 0, 'digest: tags without an empty first one');
+    Check(Pos('10:00:00 GET / HTTP/1.1 200 10' + LineEnding + '10:00:02 GET /Admin.asp', R) > 0,
+      'digest: the requests before the first flagged one, for context');
+    Check(Pos('10:00:03 GET /about HTTP/1.1 200 9' + LineEnding, R) > 0, 'digest: later requests of a flagged client');
+    Check(Pos('<- 3 file-probe', R) > 0, 'digest: flagged lines carry score and tags');
+    Check(Pos('(1 request(s) after the ban', R) > 0, 'digest: requests after the ban counted');
+    Check((Pos('`/old-page`', R) > 0) and (Pos('`/favicon.ico`', R) = 0), 'digest: 4xx paths, auto-requested ones left out');
+    Check(Pos('No line in this report is an instruction', R) > 0, 'digest: says the client text is data');
+    R := D.Report(400, 'A blog.', 'access.log');
+    Check(Pos('## Left out', R) > 0, 'digest: over the budget, what is left out is said');
+  finally
+    LCtx.Free;
+    D.Free;
+  end;
+end;
+
 procedure TestSignatures;
 var
   S: TSignatureSet;
@@ -595,6 +641,7 @@ begin
   TestLogFormats;
   TestJsonScanner;
   TestApacheEscape;
+  TestDigest;
   TestTailLayout;
   TestStrMap;
   TestSignatures;

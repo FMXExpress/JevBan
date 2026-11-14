@@ -288,6 +288,32 @@ your own traffic and run `--eval` before relying on the numbers.
 
 Model verdicts between 0.5 and the strike threshold are logged as `REVIEW` for you to audit.
 
+### Reviewing a day's traffic with a large model
+
+```bash
+jevban --digest /var/log/apache2/access.log.1 -o digest.md
+```
+
+`--digest` replays a log through the rules, bans nothing, and writes a Markdown report sized for
+one request to a large-context model (`--digest-tokens`, 200,000 by default). On a 63,000-line
+real shop log it came to about 42,000 tokens. It has:
+
+- every client the prefilter flagged: user agent, counts, tags, highest score, ban reason, and
+  its requests in compact form, including the ones before it was first flagged. **Flagged but
+  not banned** come first, ranked by score and then by how rare their tags are, because that is
+  where a missed attacker is. On the synthetic test sets, every attacker the rules missed that
+  the prefilter had flagged was in the top 9 of that list;
+- **4xx paths no rule flagged** that two or more clients asked for (favicons, touch icons,
+  `robots.txt`, sitemaps and `/.well-known/` left out): new probes, or the site's own broken
+  links;
+- a note that every request line and user agent was written by the client and is data, not
+  instructions.
+
+Ask the model what was missed, which signatures or known-bad paths to add, or how to describe
+your site; then check any new rule with `--eval` before trusting it. Clients the prefilter never
+flags are not in the report (on the synthetic web app, password guessers whose logins look like
+its API calls); they only show up through the 4xx table.
+
 ## Benchmark
 
 `bench/run.sh` measures quality and speed; every change to the detection is checked against it,
