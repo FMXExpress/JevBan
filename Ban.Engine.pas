@@ -39,7 +39,7 @@ interface
 
 uses
   SysUtils, Classes, Math, Contnrs, SyncObjs, fpjson, jsonparser,
-  Ban.Net, Ban.Hash, Ban.Apache, Ban.LogFormats, Ban.Signatures, Ban.BadPaths, Ban.Jev, Ban.Local, Ban.Firewall, Ban.Config;
+  Ban.Net, Ban.Hash, Ban.Apache, Ban.LogFormats, Ban.Digest, Ban.Signatures, Ban.BadPaths, Ban.Jev, Ban.Local, Ban.Firewall, Ban.Config;
 
 const
   { --eval labels }
@@ -198,6 +198,7 @@ type
     FLogLock: TCriticalSection;
     FLastSave: QWord;
     FClients: TStrMap;       { ip -> TClient (owned) }
+    FDigest: TDigest;        { --digest only }
     FPurgeNow: Int64;
     FBans: TStringList;      { ip -> TBanRecord }
     FMinute: Int64;
@@ -264,6 +265,8 @@ type
     procedure Stop;
     { ATruth: a --eval label (CTruth*) }
     { ALayout: the line's W3C (IIS) columns from the tailer, or nil }
+    { --digest: the report (empty unless DigestMode) }
+    function DigestReport(const AFiles: string): string;
     procedure Feed(const ALine: string; ATruth: Integer = CTruthUnknown; const ACategory: string = '';
       ALayout: TObject = nil);
     { --eval: the counts against the labels; AJsonFile <> '': also as JSON }
@@ -502,6 +505,8 @@ begin
   FLongHits := TStrMap.Create(True, 1024);
   FNets := TStrMap.Create(True, 1024);
   FEvalCats := TStringList.Create;
+  if FCfg.DigestMode then
+    FDigest := TDigest.Create;
   FEvalCats.Sorted := True;
   FEvalCats.OwnsObjects := True;
   FEvalStart := Now;
@@ -539,6 +544,7 @@ begin
   FLog.Free;
   FEvalClients.Free;
   FEvalCats.Free;
+  FDigest.Free;
   FNets.Free;
   FLongHits.Free;
   FBad.Free;
@@ -557,6 +563,9 @@ procedure TBanEngine.Log(const AMsg: string);
 var
   LLine: string;
 begin
+  { --digest writes the report, not a line per decision }
+  if FDigest <> nil then
+    Exit;
   LLine := FormatDateTime('yyyy-mm-dd hh:nn:ss', Now) + ' jevban: ' + AMsg;
   { the action worker logs too }
   FLogLock.Enter;
@@ -688,9 +697,18 @@ begin
       EvictOldest(Max(1, FClients.Count div 10));
   end;
   Result := TClient.Create;
+  if FDigest <> nil then
+    FDigest.NewClient;
   Result.IpText := E.IpText;
   Result.Ip := E.Ip;
   FClients.Put(E.IpText, Result);
+end;
+
+function TBanEngine.DigestReport(const AFiles: string): string;
+begin
+  if FDigest = nil then
+    Exit('');
+  Result := FDigest.Report(FCfg.DigestTokens, FCfg.Site, AFiles);
 end;
 
 procedure TBanEngine.Feed(const ALine: string; ATruth: Integer; const ACategory: string; ALayout: TObject);
@@ -757,6 +775,8 @@ begin
     { already banned: a connection that was open before the ban }
     if ATruth <> CTruthUnknown then
       Inc(FEvalAfterBan[ATruth]);
+    if FDigest <> nil then
+      FDigest.AfterBan(E.IpText);
     Exit;
   end;
   C := GetClient(E, LNow);
@@ -875,6 +895,14 @@ begin
           LTags.Add('file-scan');
         end;
       end;
+    end;
+    { before Judge: a ban it leads to finds the client's record with its requests }
+    if FDigest <> nil then
+    begin
+      FDigest.Add(E.IpText, C.Agent, LNow, LModelLine, LTags.CommaText, LScore,
+        LScore >= FCfg.SuspiciousScore, C.Recent);
+      if (LScore < FCfg.SuspiciousScore) and (E.Status >= 400) and (E.Status < 500) then
+        FDigest.AddMiss(E.IpText, NormalizePath(E.Decoded), E.Status);
     end;
     if LScore >= FCfg.SuspiciousScore then
     begin
@@ -1684,6 +1712,8 @@ begin
     TEvalClient(FEvalClients.Objects[I]).BannedAt := Max(FLastNow, 1);
   { "Ban <ip>" is what a fail2ban filter on our logfile would match }
   Log(Format('Ban %s for %ds (ban #%d): %s', [B.IpText, LSecs, B.Count, AReason]));
+  if FDigest <> nil then
+    FDigest.Banned(B.IpText, AReason);
   if not FCfg.TestMode then
   begin
     { the firewall call runs on the action worker; the state is saved by Tick,
