@@ -427,6 +427,15 @@ begin
   end;
 end;
 
+procedure TestRetryAfter;
+begin
+  Check(RetryAfterSecs('{"error":{"message":"Rate limit exceeded ... Please retry in 19s or upgrade"}}') = 20,
+    'retry: "retry in 19s" (rounded up)');
+  Check(RetryAfterSecs('{"error":{"details":[{"retryDelay": "7s"}]}}') = 8, 'retry: retryDelay');
+  Check(RetryAfterSecs('{"error":{"message":"slow down"}}') = 10, 'retry: no delay named, 10 s');
+  Check(RetryAfterSecs('Please retry in 9999s') = 120, 'retry: at most 120 s');
+end;
+
 procedure TestGeminiWire;
 var
   C: TJevClient;
@@ -661,6 +670,7 @@ begin
   TestSignatureFile;
   TestJev;
   TestGeminiWire;
+  TestRetryAfter;
   WriteLn(Format('%d checks, %d failed', [Checks, Failures]));
   if Failures > 0 then
     ExitCode := 1;
