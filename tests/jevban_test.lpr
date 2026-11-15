@@ -389,6 +389,50 @@ begin
   end;
 end;
 
+procedure TestInjectionSignatures;
+var
+  S: TSignatureSet;
+  E: TAccessEntry;
+  T: TStringList;
+  LAgent: Integer;
+
+  function Tags(const ATarget, AAgent: string; out AAgentScore: Integer): string;
+  begin
+    T.Clear;
+    ParseAccessLine('192.0.2.1 - - [31/Oct/2026:10:00:11 +0000] "GET ' + ATarget + ' HTTP/1.1" 200 1 "-" "' +
+      AAgent + '"', E);
+    S.Score(E, T, AAgentScore);
+    Result := T.CommaText;
+  end;
+
+begin
+  S := TSignatureSet.Create;
+  T := TStringList.Create;
+  try
+    Check(Pos('sqli', Tags('/search?q=%22%20AND%201%3D1--', 'x', LAgent)) > 0, 'sqli: double-quote boolean');
+    Check(Pos('sqli', Tags('/search?q=%22%20AND%201%3D%28SELECT%20LENGTH%28HEX%28RANDOMBLOB%28200%29%29%29%29--', 'x',
+      LAgent)) > 0, 'sqli: and 1=(select');
+    Check(Pos('sqli', Tags('/item?id=5%20and%201%3D%28select%201%29', 'x', LAgent)) > 0, 'sqli: numeric, no quote');
+    Check(Pos('sqli', Tags('/search?q=%22rock%20and%20roll%22', 'x', LAgent)) = 0, 'sqli: a quoted search is not');
+    Check(Pos('sqli', Tags('/search?q=and%201%3D1%20puzzle', 'x', LAgent)) = 0, 'sqli: no quote, no select: not');
+    Check(Pos('shell-inject', Tags('/admin/ping?host=127.0.0.1|id', 'x', LAgent)) > 0, 'shell: |id');
+    Check(Pos('shell-inject', Tags('/admin/ping?host=127.0.0.1;uname%20-a', 'x', LAgent)) > 0, 'shell: ;uname');
+    Check(Pos('shell-inject', Tags('/list?sort=name|identity', 'x', LAgent)) = 0, 'shell: |identity is not |id');
+    Check(Pos('template-inject', Tags('/admin/template?tpl={{31337*2}}', 'x', LAgent)) > 0, 'template: {{n*n}}');
+    Check(Pos('template-inject', Tags('/t?x=${7*7}', 'x', LAgent)) > 0, 'template: ${n*n}');
+    Check(Pos('template-inject', Tags('/admin/template?tpl={{phpversion()}}', 'x', LAgent)) > 0, 'template: {{phpversion()}}');
+    Check(Pos('template-inject', Tags('/docs/{{name}}', 'x', LAgent)) = 0, 'template: a placeholder is not');
+    { the agent's share of the score: what the user-agent guard reads }
+    Tags('/', 'Go-http-client/2.0', LAgent);
+    Check((T.CommaText = 'script-agent') and (LAgent = 3), 'agent score: script agent alone');
+    Tags('/item.php?id=1+union+select+1', 'Go-http-client/2.0', LAgent);
+    Check(LAgent = 3, 'agent score: the url''s rules not counted as the agent''s');
+  finally
+    T.Free;
+    S.Free;
+  end;
+end;
+
 procedure TestSignatures;
 var
   S: TSignatureSet;
@@ -729,6 +773,7 @@ begin
   TestTailLayout;
   TestStrMap;
   TestSignatures;
+  TestInjectionSignatures;
   TestSignatureFile;
   TestJev;
   TestGeminiWire;
