@@ -79,11 +79,13 @@ access.log ─▶ decode + normalize ─▶ score: signatures + known-bad paths
                                          │              one batched request every few seconds
                                          │                p ≥ 0.97 ban · p ≥ 0.80 strike
                                          │                p ≥ 0.50 REVIEW (logged, no strike)
+                                         │             (the thresholds of OpenJev; each provider's own)
                                          ▼                            │
                            3 strikes within 10 minutes  ◀─────────────┘
                                          │
                                          ▼
-                         ban in the firewall for 1 hour (doubling for repeat offenders)
+                ban for 1 hour (doubling for repeat offenders): in the firewall,
+                  at Cloudflare's edge for every site in the account, or both
 ```
 
 1. **Decode and normalize.** Apache's `\xhh` escapes and URL encoding (twice, to undo double
@@ -98,9 +100,13 @@ access.log ─▶ decode + normalize ─▶ score: signatures + known-bad paths
    every 5 seconds (or 1,000 lines, or 8 clients). The model sees the client's flagged
    requests, its other recent requests, and your `site =` description, and returns the
    probability that the client is attacking. A verdict is reused for 60 seconds, so a scanner
-   firing 200 probes costs one question.
-5. **Ban.** `maxretry` strikes within `findtime` ban the client in the firewall for
-   `bantime`. Bans are saved and restored across restarts, and lifted when they expire.
+   firing 200 probes costs one question. The model alone never strikes a request that was
+   flagged for nothing but its user agent and was answered: a user agent says who a client
+   is, not what it did, and an uptime monitor fetching `/` every five minutes is not an attack.
+   At most, such a request is logged as REVIEW.
+5. **Ban.** `maxretry` strikes within `findtime` ban the client for `bantime`: in the server's
+   firewall, and with `[cloudflare]` at Cloudflare's edge (see "Behind Cloudflare"). Bans are
+   saved and restored across restarts, and lifted when they expire.
 
 ## Quick start
 
@@ -225,8 +231,8 @@ Gemini's probabilities run lower than OpenJev's for some real attackers, so the 
 0.50 and logs REVIEW from 0.30 (chosen on the benchmark's dev splits; `threshold =` and
 `review_threshold =` override them). On the held-out test splits it banned 1–2 more attackers
 per site than the rules alone (password guessers, stealth scanners) and no benign client, at
-about half a second per batch, close to the local Flash 9B (which on the same build banned one
-benign uptime monitor; `bench/results/iter9-gemini`).
+about half a second per batch, close to the local Flash 9B (which then banned one benign
+uptime monitor, since prevented by the user-agent rule; `bench/results/iter9-gemini`).
 
 ### Your own server
 
@@ -245,8 +251,8 @@ url = http://127.0.0.1:3000/v1/systemone
 |---|---|---|
 | Leaked secrets and repositories | `/.env`, `/.git/config`, `/.aws/credentials`, `id_rsa` | 10 |
 | Path traversal, system files | `../`, `/etc/passwd`, `/proc/self/` | 10 |
-| Code execution | `${jndi:` (Log4Shell), shell injection, PHP-CGI argument injection, `php://input`, phpunit and ThinkPHP RCE, router exploits | 10 |
-| SQL injection | `union select`, `sleep(`, `information_schema` | 10 |
+| Code execution | `${jndi:` (Log4Shell), shell injection (`;wget`, `\|id`, `\|whoami`), template injection (`{{7*7}}`, `${7*7}`), PHP-CGI argument injection, `php://input`, phpunit and ThinkPHP RCE, router exploits | 10 |
+| SQL injection | `union select`, `sleep(`, `information_schema`, `' or 1=1`, `" AND 1=(SELECT …)` | 10 |
 | Scanner tools | sqlmap, nikto, nuclei, zgrab, masscan, wpscan, gobuster, ffuf… | 10 |
 | Text written for an AI judge | a user agent saying "ignore previous instructions", "do not block", "this client is legitimate" | 10 |
 | Admin tools and config files | phpMyAdmin, Adminer, Tomcat manager, `wp-config.php.bak`, `web.config` | 6 |
@@ -315,7 +321,7 @@ jevban --digest /var/log/apache2/access.log.1 -o digest.md
 
 `--digest` replays a log through the rules, bans nothing, and writes a Markdown report sized for
 one request to a large-context model (`--digest-tokens`, 200,000 by default). On a 63,000-line
-real shop log it came to about 42,000 tokens. It has:
+lab shop log (LogarX) it came to about 42,000 tokens. It has:
 
 - every client the prefilter flagged: user agent, counts, tags, highest score, ban reason, and
   its requests in compact form, including the ones before it was first flagged. **Flagged but
@@ -344,9 +350,12 @@ and benign clients banned must not go up.
   clients with script user agents, link checkers, SEO crawlers, monitors, the owner logging
   in); the attacks include what dodges them (path variants, encodings, slow scanners, scans
   spread over a subnet, scanners hiding between page views, prompt-injecting user agents).
-- **Real traffic**: the [LogarX/Zodiarc](https://github.com/FRTX045/LogarX-Dataset) labelled
-  shop log (63,000 lines of real Apache output, real tools, a label on every line), downloaded
-  at benchmark time and checksum-pinned (`bench/fetch_logarx.py`).
+- **A labelled lab log**: the [LogarX/Zodiarc](https://github.com/FRTX045/LogarX-Dataset) shop
+  log (63,000 lines of real Apache output from a test shop, browsed by scripts and attacked
+  with real tools: dirb, gobuster, sqlmap…; a label on every line), downloaded at benchmark
+  time and checksum-pinned (`bench/fetch_logarx.py`; it has no licence, so it is not in the
+  repository). It is not internet traffic, and its attackers are easy (the rules alone ban
+  them all); it mostly measures false positives.
 - **Live**: `bench/live.py` measures wall-clock time to a ban with the daemon tailing a log
   written in real time.
 
@@ -357,22 +366,23 @@ Signatures and behaviour rules alone (no model), held-out test splits and LogarX
 | WordPress test | 0 of 73 | 44 of 51 | 196 |
 | Static site test | 0 of 72 | 48 of 52 | 170 |
 | Web app test | 0 of 79 | 43 of 51 | 216 |
-| LogarX (real) | 0 of 789 | 126 of 126 | 536 |
+| LogarX (lab) | 0 of 789 | 126 of 126 | 536 |
 
 The attackers the rules still miss are the ones that look like ordinary use (password
 guessing, plugin probing, stealthy scanning between page views); those are the model's job.
-Adding Flash 9B on the same held-out test splits (4-core CPU, measured before the file-probe
-rules):
+With a model on the same held-out test splits:
 
-| | Benign clients banned | Attackers banned, rules alone | Attackers banned, rules + Flash 9B |
-|---|---|---|---|
-| WordPress test | 0 of 73 | 44 of 51 | 47 of 51 |
-| Static site test | 0 of 72 | 43 of 52 | 46 of 52 |
-| Web app test | 0 of 79 | 41 of 51 | 43 of 51 |
+| | Rules alone | + Gemini Decision 1 | + OpenJev Flash 9B (local, 4-core CPU) | Benign banned |
+|---|---|---|---|---|
+| WordPress test | 44 of 51 | 46 of 51 | 47 of 51 | 0 |
+| Static site test | 48 of 52 | 49 of 52 | 49 of 52 | 0 |
+| Web app test | 43 of 51 | 44 of 51 | 44 of 51 | 0 |
+| Time for the split | under a second | 18–128 s | 7–26 minutes | |
 
-The model adds the password guessers on the WordPress and static sites and a few plugin and
-exploit probers, and bans no one the rules spared. Scanners hidden between ordinary page views
-(`stealth`, 3 per split) were missed by both; the file-probe rules now catch some of them.
+The models add password guessers and stealth scanners. Before the user-agent rule above,
+Flash 9B banned one uptime monitor on the static site (five separate verdicts at 0.80–0.84 on
+`GET /`); with it, none (`bench/results/iter9-gemini`, `iter10-agent-guard`; Flash's
+WordPress and web app figures are from before the rule, which only ever removes strikes).
 
 ### What the model decides, and what it doesn't
 
@@ -380,7 +390,7 @@ The work is split by how certain a request is. Weight-10 matches are hard rules:
 legitimate, decided without the model. Requests that score below 3 never reach it. Everything
 in between (a WordPress login, a plugin path that 404s, a path scan, a file probe, a script
 user agent) is the model's call, judged per client with its recent requests and your `site`
-description. On the WordPress test split that was 137 model calls: 35 strikes and 292 passes,
+description. On the WordPress test split (Flash 9B, iteration 4) that was 137 model calls: 35 strikes and 292 passes,
 against 34 hard-rule decisions. Rules alone never strike these clients, so every password
 guesser the model banned (3 of 3 on WordPress) is one the rules let through, and every pass
 is a site-dependent request that a stricter rule would have had to ban or ignore blindly.
@@ -443,20 +453,23 @@ documents every key. The ones you'll want to look at:
 |---|---|---|
 | `[jevban] logpath` | `/var/log/apache2/access.log` | Logs to follow; comma separated, wildcards allowed |
 | `ignoreip` | `127.0.0.0/8 ::1` | Addresses and CIDR ranges never judged or banned |
+| `behind` | | `cloudflare`: the site is behind it; its addresses are never judged or banned |
 | `findtime` / `maxretry` / `bantime` | `600` / `3` / `3600` | Strikes within seconds, strikes for a ban, ban seconds |
 | `bantime.increment` / `bantime.maxtime` | `1` / `604800` | Double the ban for repeat offenders, up to a week |
 | `[decider] site` | a generic public site | What your server runs, in plain words: **the most important setting** |
 | `mode` | `local` | `local`, `jev` or `rules` |
 | `local_model` | `flash-9b` | Which OpenJev model, or a `.gguf` path |
-| `provider` | | A hosted API: `typesafe`, `perplexity`, `liquid`, … |
+| `provider` | | A hosted API: `typesafe`, `perplexity`, `liquid`, `gemini`, … |
 | `threshold` / `instant_threshold` | `0.80` / `0.97` | Model probability for a strike / an instant ban |
 | `override_score` | `10` | Score that strikes without asking the model (0 = model decides all) |
 | `review_threshold` | `0.5` | Model probability logged as REVIEW |
 | `batch_interval` | `5` | Seconds between model batches |
+| `decider_backlog` | `4` | Batches waiting for a busy model; beyond it the rules decide at once |
 | `shadow` | `0` | Log the model's verdicts, ban on the rules only |
 | `[action] type` | `iptables` (Linux), `netsh` (Windows) | Firewall backend |
 | `port` | `80,443` | Ports the ban applies to |
 | `dry_run` | `0` | Log firewall commands instead of running them |
+| `[cloudflare] account_id` | | Ban at Cloudflare's edge for every site in the account (with `api_token`; see "Behind Cloudflare") |
 
 A good `site =` makes a large difference. For example:
 
@@ -474,17 +487,21 @@ jevban [options]
   -l, --log FILE         access log or wildcard pattern to follow (repeatable)
       --from-start       read the logs from their start, not just new lines
   -t, --test FILE        read FILE once, print each decision, ban nothing
-      --eval FILE        replay a labelled log and score the decisions
+      --eval FILE        replay a labelled log and score the decisions (--eval-json FILE: as JSON)
+      --digest FILE      replay FILE through the rules and write a review report for a model
+  -o, --out FILE         where --digest writes (default: standard output)
+      --digest-tokens N  the report's size limit (default 200000)
       --shadow           ask the model and log its verdicts, but let the signatures ban
   -n, --dry-run          log the firewall commands instead of running them
   -m, --mode MODE        local | jev | rules
       --model NAME       local model, or a .gguf path
-  -p, --provider NAME    a hosted decision API
+  -p, --provider NAME    a hosted decision API (typesafe, perplexity, gemini, ...)
   -u, --jev-url URL      a Jev-compatible server
-  -a, --action TYPE      iptables | nftables | ufw | firewalld | fail2ban | netsh | command | none
+  -a, --action TYPE      iptables | ipset | nftables | ufw | firewalld | fail2ban | netsh | command | none
   -b, --batch SECONDS    seconds between model batches
       --list             print the active bans and exit
   -v, --verbose          log every flagged request and verdict
+      --version
 ```
 
 ## Firewall actions
@@ -506,6 +523,11 @@ and cleanup on stop, for IPv4 and IPv6. The `iptables` preset adds one rule per 
 the kernel checks one by one for every packet, and adding a ban gets slower too (50 bans took
 191 ms with no bans in place, 419 ms with 20,000); `ipset` and `nftables` keep the addresses in
 a hash set, where both stay flat.
+
+With `[cloudflare]`, every ban also goes into one IP list in the Cloudflare account, blocked
+on every site by one rule each: the only place a ban works for visitors who arrive through
+Cloudflare. It runs alongside `type`, which still stops requests made straight to the server
+(see "Behind Cloudflare").
 
 Actions follow fail2ban's lifecycle (`actionstart`, `actionban`, `actionunban`, `actionstop`),
 and any of the four commands can be overridden in `[action]` with tags such as `<ip>`,
