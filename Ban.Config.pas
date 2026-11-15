@@ -99,7 +99,8 @@ type
     constructor Create;
     destructor Destroy; override;
     { fills url, model and the key from Provider where the config left them unset }
-    procedure ApplyProvider(AUrlSet, AModelSet: Boolean);
+    procedure ApplyProvider(AUrlSet, AModelSet: Boolean; AThresholdSet: Boolean = False;
+      AReviewSet: Boolean = False);
     { parses the command line; raises EArgumentException on a bad option.
       Returns False when --help/--version printed and the program should exit }
     function Load: Boolean;
@@ -118,6 +119,9 @@ type
     MaxQuestions: Integer;   { per request; 0 = no stated limit }
     MaxPerMinute: Integer;   { requests; 0 = no stated limit }
     Wire: string;            { request format: 'systemone' or 'gemini' }
+    (* the model's own calibration: P(attack) for a strike and for REVIEW, used
+       unless the config sets threshold / review_threshold; 0 = jevban's *)
+    Threshold, ReviewThreshold: Double;
   end;
 
 const
@@ -127,23 +131,24 @@ const
     body and Authorization: Bearer <key> }
   CProviders: array[0..7] of TProviderInfo = (
     (Name: 'typesafe'; Url: 'https://api.typesafe.ai/v1/systemone'; Model: 'jev-latest';
-      KeyEnv: 'TYPESAFE_API_KEY'; MaxQuestions: 0; MaxPerMinute: 0; Wire: 'systemone'),
+      KeyEnv: 'TYPESAFE_API_KEY'; MaxQuestions: 0; MaxPerMinute: 0; Wire: 'systemone'; Threshold: 0; ReviewThreshold: 0),
     (Name: 'perplexity'; Url: 'https://api.perplexity.ai/v1/decisions'; Model: 'pplx-decider-latest';
-      KeyEnv: 'PERPLEXITY_API_KEY'; MaxQuestions: 0; MaxPerMinute: 0; Wire: 'systemone'),
+      KeyEnv: 'PERPLEXITY_API_KEY'; MaxQuestions: 0; MaxPerMinute: 0; Wire: 'systemone'; Threshold: 0; ReviewThreshold: 0),
     (Name: 'perplexity-flash'; Url: 'https://api.perplexity.ai/v1/decisions'; Model: 'pplx-decider-flash-latest';
-      KeyEnv: 'PERPLEXITY_API_KEY'; MaxQuestions: 0; MaxPerMinute: 0; Wire: 'systemone'),
+      KeyEnv: 'PERPLEXITY_API_KEY'; MaxQuestions: 0; MaxPerMinute: 0; Wire: 'systemone'; Threshold: 0; ReviewThreshold: 0),
     (Name: 'liquid'; Url: 'https://api.liquid.ai/decisions/v1/systemone'; Model: 'd1.1';
-      KeyEnv: 'LIQUID_API_KEY'; MaxQuestions: 0; MaxPerMinute: 0; Wire: 'systemone'),
+      KeyEnv: 'LIQUID_API_KEY'; MaxQuestions: 0; MaxPerMinute: 0; Wire: 'systemone'; Threshold: 0; ReviewThreshold: 0),
     (Name: 'digitalocean'; Url: 'https://inference.do-ai.run/v1/systemone'; Model: 'typesafe-jev-1.13.0';
-      KeyEnv: 'MODEL_ACCESS_KEY'; MaxQuestions: 0; MaxPerMinute: 0; Wire: 'systemone'),
+      KeyEnv: 'MODEL_ACCESS_KEY'; MaxQuestions: 0; MaxPerMinute: 0; Wire: 'systemone'; Threshold: 0; ReviewThreshold: 0),
     (Name: 'abacus'; Url: 'https://routellm.abacus.ai/v1/systemone'; Model: 'jev-latest';
-      KeyEnv: 'ABACUS_API_KEY'; MaxQuestions: 10; MaxPerMinute: 20; Wire: 'systemone'),
+      KeyEnv: 'ABACUS_API_KEY'; MaxQuestions: 10; MaxPerMinute: 20; Wire: 'systemone'; Threshold: 0; ReviewThreshold: 0),
     (Name: 'vercel'; Url: 'https://ai-gateway.vercel.sh/typesafe/v1/systemone'; Model: 'typesafe-ai/jev';
-      KeyEnv: 'AI_GATEWAY_API_KEY'; MaxQuestions: 0; MaxPerMinute: 0; Wire: 'systemone'),
+      KeyEnv: 'AI_GATEWAY_API_KEY'; MaxQuestions: 0; MaxPerMinute: 0; Wire: 'systemone'; Threshold: 0; ReviewThreshold: 0),
     { Google's Decisions API: the same questions, its own request shape (Ban.Jev); up to
       1,000 questions a request, which the batch never comes near }
     (Name: 'gemini'; Url: 'https://generativelanguage.googleapis.com/v1beta/decisions';
-      Model: 'gemini-decision-1'; KeyEnv: 'GEMINI_API_KEY'; MaxQuestions: 0; MaxPerMinute: 0; Wire: 'gemini'));
+      Model: 'gemini-decision-1'; KeyEnv: 'GEMINI_API_KEY'; MaxQuestions: 0; MaxPerMinute: 0; Wire: 'gemini';
+      Threshold: 0.5; ReviewThreshold: 0.3));
 
 implementation
 
@@ -311,7 +316,7 @@ var
   LIni: TMemIniFile;
   LCliLogs: TStringList;
   LCli: TStringList;   { name=value from the command line, applied after the file }
-  LUrlSet, LModelSet: Boolean;
+  LUrlSet, LModelSet, LThresholdSet, LReviewSet: Boolean;
 
   function NextVal: string;
   begin
@@ -333,6 +338,11 @@ var
 
 begin
   Result := True;
+  { set from the config file, if there is one }
+  LUrlSet := False;
+  LModelSet := False;
+  LThresholdSet := False;
+  LReviewSet := False;
   LCliLogs := TStringList.Create;
   LCli := TStringList.Create;
   try
@@ -473,6 +483,8 @@ begin
         JevModel := Trim(LIni.ReadString('decider', 'model', ''));
       TimeoutMs := LIni.ReadInteger('decider', 'timeout_ms', TimeoutMs);
       Threshold := F('threshold', Threshold);
+      LThresholdSet := Trim(LIni.ReadString('decider', 'threshold', '')) <> '';
+      LReviewSet := Trim(LIni.ReadString('decider', 'review_threshold', '')) <> '';
       InstantThreshold := F('instant_threshold', InstantThreshold);
       CacheSecs := LIni.ReadInteger('decider', 'cache_secs', CacheSecs);
       CachePassSecs := LIni.ReadInteger('decider', 'cache_pass_secs', CachePassSecs);
@@ -542,7 +554,7 @@ begin
     begin
       if LCli.Values['mode'] = '' then
         Mode := 'jev';
-      ApplyProvider(LUrlSet, LModelSet);
+      ApplyProvider(LUrlSet, LModelSet, LThresholdSet, LReviewSet);
     end;
     if JevKey = '' then
       JevKey := GetEnvironmentVariable('JEV_API_KEY');
@@ -557,7 +569,7 @@ begin
   end;
 end;
 
-procedure TBanConfig.ApplyProvider(AUrlSet, AModelSet: Boolean);
+procedure TBanConfig.ApplyProvider(AUrlSet, AModelSet, AThresholdSet, AReviewSet: Boolean);
 var
   I: Integer;
   P: TProviderInfo;
@@ -571,6 +583,10 @@ begin
       if not AModelSet then
         JevModel := P.Model;
       JevWire := P.Wire;
+      if (P.Threshold > 0) and not AThresholdSet then
+        Threshold := P.Threshold;
+      if (P.ReviewThreshold > 0) and not AReviewSet then
+        ReviewThreshold := P.ReviewThreshold;
       if JevKey = '' then
         JevKey := GetEnvironmentVariable(P.KeyEnv);
       if P.MaxQuestions > 0 then

@@ -217,8 +217,16 @@ for a proxy in front of it). The Decisions API refuses a request whose text trip
 filter, and a client can write such text into its user agent to send everyone it shares a batch
 with to the rules. So a refused batch is asked again one client at a time; a client refused on
 its own is logged as `REVIEW` (probability 0.5, intent `blocked_by_safety_filter`), not banned.
-The request shape is tested against a mock that checks it as Google documents it, not yet
-against the service itself.
+A rate-limited request (HTTP 429, from any provider) is retried after the wait the provider
+names, up to six times, before the rules decide; on Gemini's free tier (50,000 input tokens a
+minute) that is what keeps a busy batch with the model rather than the rules.
+
+Gemini's probabilities run lower than OpenJev's for some real attackers, so the preset strikes at
+0.50 and logs REVIEW from 0.30 (chosen on the benchmark's dev splits; `threshold =` and
+`review_threshold =` override them). On the held-out test splits it banned 1–2 more attackers
+per site than the rules alone (password guessers, stealth scanners) and no benign client, at
+about half a second per batch, close to the local Flash 9B (which on the same build banned one
+benign uptime monitor; `bench/results/iter9-gemini`).
 
 ### Your own server
 

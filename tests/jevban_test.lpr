@@ -473,6 +473,15 @@ begin
   end;
 end;
 
+procedure TestRetryAfter;
+begin
+  Check(RetryAfterSecs('{"error":{"message":"Rate limit exceeded ... Please retry in 19s or upgrade"}}') = 20,
+    'retry: "retry in 19s" (rounded up)');
+  Check(RetryAfterSecs('{"error":{"details":[{"retryDelay": "7s"}]}}') = 8, 'retry: retryDelay');
+  Check(RetryAfterSecs('{"error":{"message":"slow down"}}') = 10, 'retry: no delay named, 10 s');
+  Check(RetryAfterSecs('Please retry in 9999s') = 120, 'retry: at most 120 s');
+end;
+
 procedure TestGeminiWire;
 var
   C: TJevClient;
@@ -641,6 +650,21 @@ begin
     C.BatchClients := 30;
     C.ApplyProvider(False, False);
     Check(C.BatchClients = 10, 'abacus: at most 10 questions a request');
+    C.Provider := 'gemini';
+    C.Threshold := 0.8;
+    C.ReviewThreshold := 0.5;
+    C.ApplyProvider(False, False);
+    Check((C.JevWire = 'gemini') and (C.JevModel = 'gemini-decision-1') and (Abs(C.Threshold - 0.5) < 1e-9) and
+      (Abs(C.ReviewThreshold - 0.3) < 1e-9), 'gemini preset: its wire and its own thresholds');
+    C.Threshold := 0.7;
+    C.ReviewThreshold := 0.4;
+    C.ApplyProvider(False, False, True, True);
+    Check((Abs(C.Threshold - 0.7) < 1e-9) and (Abs(C.ReviewThreshold - 0.4) < 1e-9),
+      'gemini preset: thresholds set in the config win');
+    C.Provider := 'typesafe';
+    C.Threshold := 0.8;
+    C.ApplyProvider(False, False);
+    Check((C.JevWire = 'systemone') and (Abs(C.Threshold - 0.8) < 1e-9), 'other presets keep jevban''s thresholds');
     C.Provider := 'openrouter';
     try
       C.ApplyProvider(False, False);
@@ -708,6 +732,7 @@ begin
   TestSignatureFile;
   TestJev;
   TestGeminiWire;
+  TestRetryAfter;
   WriteLn(Format('%d checks, %d failed', [Checks, Failures]));
   if Failures > 0 then
     ExitCode := 1;

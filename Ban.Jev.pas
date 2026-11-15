@@ -34,7 +34,7 @@ unit Ban.Jev;
 interface
 
 uses
-  SysUtils, Classes, fpjson, jsonparser, DateUtils;
+  SysUtils, Classes, Math, StrUtils, fpjson, jsonparser, DateUtils;
 
 type
   { one client in a batch: the inputs, then the answer }
@@ -62,7 +62,10 @@ type
   TJevClient = class(TDecider)
   private
     FBlocked: Boolean;   { the last Post was refused by the Decisions API's safety filter }
+    FLastStatus: Integer;
+    FLastBody: string;
     function Post(AItems: TList; out AError: string; out ALatencyMs: Int64): Boolean;
+    function PostOnce(AItems: TList; out AError: string; var ALatencyMs: Int64): Boolean;
   public
     Url: string;
     ApiKey: string;
@@ -72,6 +75,7 @@ type
     AskIntent: Boolean;      { a second question per client: twice the readouts }
     TimeoutMs: Integer;
     Wire: string;            { 'systemone' (POST /v1/systemone) or 'gemini' (Decisions API) }
+    RateWaits: Integer;      { 429s waited out }
     constructor Create;
     function BuildRequest(AItems: TList): string;
     function ClientRef(const AIp: string): string;
@@ -84,6 +88,8 @@ var
   DeciderAbort: Boolean = False;
 
 function ParseJevResponse(const ABody: string; AItems: TList; out AError: string): Boolean;
+{ seconds an HTTP 429 body asks to wait (1..120; 10 if it names none) }
+function RetryAfterSecs(const ABody: string): Integer;
 
 const
   CDefaultQuestion = 'Is this client probing for or exploiting security vulnerabilities on this ' +
@@ -345,7 +351,68 @@ begin
   end;
 end;
 
+(* seconds a 429 asks to wait: Google's "Please retry in 19s" or its retryDelay
+   "19s"; 10 when the body names none. At least 1, at most 120 *)
+function RetryAfterSecs(const ABody: string): Integer;
+var
+  P, I: Integer;
+  LNum: string;
+begin
+  Result := 10;
+  P := Pos('retry in ', LowerCase(ABody));
+  if P > 0 then
+    Inc(P, Length('retry in '))
+  else
+  begin
+    P := Pos('"retryDelay"', ABody);
+    if P = 0 then
+      Exit;
+    P := PosEx('"', ABody, P + Length('"retryDelay"'));
+    if P = 0 then
+      Exit;
+    Inc(P);
+  end;
+  I := P;
+  while (I <= Length(ABody)) and (ABody[I] in ['0'..'9']) do
+    Inc(I);
+  LNum := Copy(ABody, P, I - P);
+  if LNum <> '' then
+    Result := StrToIntDef(LNum, 10) + 1;   { the fraction it may give, rounded up }
+  if Result < 1 then
+    Result := 1;
+  if Result > 120 then
+    Result := 120;
+end;
+
 function TJevClient.Post(AItems: TList; out AError: string; out ALatencyMs: Int64): Boolean;
+const
+  CRetries = 6;
+var
+  LTry, LWait: Integer;
+begin
+  (* HTTP 429: the provider's rate limit (Gemini's free tier: 50,000 input tokens a
+     minute). Wait as asked and try again: the decider has its own thread in the
+     daemon, so waiting costs no reading, and decider_backlog bounds what queues
+     meanwhile. Only after the retries is it an error (and the rules decide) *)
+  ALatencyMs := 0;
+  for LTry := 0 to CRetries do
+  begin
+    Result := PostOnce(AItems, AError, ALatencyMs);
+    if Result or (FLastStatus <> 429) or (LTry = CRetries) then
+      Exit;
+    LWait := RetryAfterSecs(FLastBody) * 1000;
+    while (LWait > 0) and not DeciderAbort do
+    begin
+      Sleep(Min(LWait, 200));
+      Dec(LWait, 200);
+    end;
+    if DeciderAbort then
+      Exit(False);
+    Inc(RateWaits);
+  end;
+end;
+
+function TJevClient.PostOnce(AItems: TList; out AError: string; var ALatencyMs: Int64): Boolean;
 var
   LBody, LResp: string;
   LStatus: Integer;
@@ -353,6 +420,8 @@ var
 begin
   Result := False;
   FBlocked := False;
+  FLastStatus := 0;
+  FLastBody := '';
   LBody := BuildRequest(AItems);
   LStart := Now;
   try
@@ -367,11 +436,13 @@ begin
     on E: Exception do
     begin
       AError := Format('%s: %s', [E.ClassName, E.Message]);
-      ALatencyMs := MilliSecondsBetween(Now, LStart);
+      Inc(ALatencyMs, MilliSecondsBetween(Now, LStart));
       Exit;
     end;
   end;
-  ALatencyMs := MilliSecondsBetween(Now, LStart);
+  Inc(ALatencyMs, MilliSecondsBetween(Now, LStart));
+  FLastStatus := LStatus;
+  FLastBody := LResp;
   if LStatus <> 200 then
   begin
     AError := Format('HTTP %d: %s', [LStatus, Copy(LResp, 1, 160)]);

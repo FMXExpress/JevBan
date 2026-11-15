@@ -13,6 +13,8 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 DELAY = float(os.environ.get("MOCK_DELAY", "0"))
 # MOCK_KEY: the key the Decisions API endpoint expects in x-goog-api-key (any non-empty key if unset)
 KEY = os.environ.get("MOCK_KEY", "")
+# MOCK_429=N: the first N requests get HTTP 429, worded as Google words it
+RATE_LIMITED = [int(os.environ.get("MOCK_429", "0"))]
 
 BAD = ("env-file", "vcs-dir", "traversal", "log4shell", "sqli", "php-rce", "scanner-agent",
        "binary-request", "config-file")
@@ -59,6 +61,12 @@ class H(BaseHTTPRequestHandler):
 
     def do_POST(self):
         req = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+        if RATE_LIMITED[0] > 0:
+            RATE_LIMITED[0] -= 1
+            sys.stderr.write("mock: 429\n")
+            return self.reply(429, {"error": {"message": "Rate limit exceeded for model gemini-decision-1 (limit: "
+                                              "50000 input tokens per minute on Free Tier). Please retry in 1s or "
+                                              "upgrade your tier.", "code": 429}})
         gemini = self.path.endswith("/v1beta/decisions")
         if gemini:
             problem = self.gemini_problem(req)
