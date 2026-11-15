@@ -57,6 +57,7 @@ type
     Score: Integer;
     Truth: Integer;
     Category: string;
+    AgentOnly: Boolean;      { flagged for its user agent alone, and answered below 400 }
   end;
 
   { true/false positives and negatives of strike decisions, per request }
@@ -229,19 +230,20 @@ type
     procedure CountEval(ATruth: Integer; const ACategory: string; ARulesStrike, ALiveStrike: Boolean);
     function GetClient(const E: TAccessEntry; ANow: Int64): TClient;
     procedure Judge(C: TClient; const ASummary, AModelText, ATags: string; AScore, ATruth: Integer;
-      const ACategory: string; ANow: Int64);
+      const ACategory: string; ANow: Int64; AAgentOnly: Boolean = False);
     { a fresh verdict, or a pass that still covers what the client is doing }
     function VerdictReusable(C: TClient; const ATags: string; ANow: Int64): Boolean;
     { the one place a flagged request is decided. AMal < 0: no model verdict
       (rules mode, a hard rule, the decider unavailable) }
     procedure Decide(C: TClient; const ASummary, ATags: string; AScore, ATruth: Integer;
-      const ACategory: string; AMal: Double; const AIntent, AHow: string; ANow: Int64);
+      const ACategory: string; AMal: Double; const AIntent, AHow: string; ANow: Int64; AAgentOnly: Boolean = False);
     function IsBanned(const AIp: string): Boolean;
     procedure MaybeFlush(ANow: Int64);
     procedure Flush(ANow: Int64);
     procedure ApplyJob(AJob: TDecideJob; ANow: Int64);
     procedure CollectResults;
     procedure AddStrike(C: TClient; ANow: Int64; AInstant: Boolean; const AReason: string);
+    function LiveStrikes(C: TClient; ANow: Int64): Integer;
     procedure BanClient(C: TClient; const AReason: string);
     procedure BanAddress(const AIp: TIpAddr; const AReason: string);
     { a probe (score >= rules_min_score), whatever the decider makes of it: counts
@@ -717,7 +719,7 @@ var
   C: TClient;
   LNow: Int64;
   LTags: TStringList;
-  LScore, I, LDist: Integer;
+  LScore, LAgentScore, I, LDist: Integer;
   LSummary, LModelLine, LPath, LNear: string;
   LEval: TEvalClient;
 begin
@@ -787,7 +789,7 @@ begin
   LTags := TStringList.Create;
   try
     LTags.Duplicates := dupIgnore;
-    LScore := FSigs.Score(E, LTags);
+    LScore := FSigs.Score(E, LTags, LAgentScore);
     (* a signed-in user's own admin pages are not a probe. Login forms answer a
        failed attempt with the form again (200) and a successful one with a
        redirect (WordPress: 302 to /wp-admin/): a password guesser collects 200s,
@@ -909,7 +911,12 @@ begin
       Inc(Stats.Suspicious);
       { the log's line, only for the lines that are logged }
       LSummary := EntrySummary(E);
-      Judge(C, LSummary, LModelLine, LTags.CommaText, LScore, ATruth, ACategory, LNow);
+      (* flagged for its user agent alone (curl, Go-http-client, python-requests...)
+         and answered: who it says it is, not what it asked for. An uptime monitor
+         fetching / every five minutes looks like this, and a model that judges each
+         look on its own can strike it again and again *)
+      Judge(C, LSummary, LModelLine, LTags.CommaText, LScore, ATruth, ACategory, LNow,
+        (LScore - LAgentScore <= 0) and (E.Status < 400));
       if (LScore >= FCfg.RulesMinScore) and not IsBanned(C.IpText) then
         ProbeHit(C, LNow, LTags.CommaText + ', score ' + IntToStr(LScore));
     end
@@ -969,7 +976,7 @@ begin
 end;
 
 procedure TBanEngine.Judge(C: TClient; const ASummary, AModelText, ATags: string; AScore, ATruth: Integer;
-  const ACategory: string; ANow: Int64);
+  const ACategory: string; ANow: Int64; AAgentOnly: Boolean);
 var
   LLine: TPendingLine;
   LTag: string;
@@ -991,7 +998,7 @@ begin
   begin
     Inc(C.SinceVerdict);
     Decide(C, ASummary, ATags, AScore, ATruth, ACategory, C.VerdictMal, C.VerdictIntent,
-      FCfg.Mode + ' (cached)', ANow);
+      FCfg.Mode + ' (cached)', ANow, AAgentOnly);
     Exit;
   end;
   { the next batch decides }
@@ -1008,6 +1015,7 @@ begin
   LLine.Score := AScore;
   LLine.Truth := ATruth;
   LLine.Category := ACategory;
+  LLine.AgentOnly := AAgentOnly;
   C.Pending.Add(LLine);
   LTagList := TStringList.Create;
   try
@@ -1065,11 +1073,12 @@ begin
 end;
 
 procedure TBanEngine.Decide(C: TClient; const ASummary, ATags: string; AScore, ATruth: Integer;
-  const ACategory: string; AMal: Double; const AIntent, AHow: string; ANow: Int64);
+  const ACategory: string; AMal: Double; const AIntent, AHow: string; ANow: Int64; AAgentOnly: Boolean);
 var
   LRulesStrike, LRulesInstant, LModelStrike, LModelInstant, LReview, LStrike, LInstant: Boolean;
-  LVerdict, LModel, LReason: string;
+  LVerdict, LModel, LReason, LAgentNote: string;
 begin
+  LAgentNote := '';
   LRulesStrike := AScore >= FCfg.RulesMinScore;
   LRulesInstant := AScore >= FCfg.RulesInstantScore;
   LModelStrike := (AMal >= 0) and (AMal >= FCfg.Threshold);
@@ -1092,13 +1101,25 @@ begin
       LStrike := False
     else if LStrike and (FStrikeCap > 0) then
       Dec(FStrikeCap);
+    (* the model alone does not strike a request with nothing in it but the
+       client's user agent, answered below 400: at most REVIEW. A user agent is
+       an identity, not an act, and an answered request is not a probe. A
+       scanner agent is a hard rule (never asked about), and whatever probes
+       (a 4xx, a login, a known path) carries its own evidence *)
+    if AAgentOnly and (LStrike or LInstant) then
+    begin
+      LStrike := False;
+      LInstant := False;
+      LReview := FCfg.ReviewThreshold > 0;
+      LAgentNote := ' (user agent only: no strike)';
+    end;
   end;
   CountEval(ATruth, ACategory, LRulesStrike, LStrike);
 
   if LInstant then
     LVerdict := 'BAN'
   else if LStrike then
-    LVerdict := Format('strike %d/%d', [Length(C.Strikes) + 1, FCfg.MaxRetry])
+    LVerdict := Format('strike %d/%d', [LiveStrikes(C, ANow) + 1, FCfg.MaxRetry])
   else if LReview and not FCfg.Shadow then
     LVerdict := 'REVIEW'
   else
@@ -1108,7 +1129,7 @@ begin
   LModel := '';
   if AMal >= 0 then
   begin
-    LModel := Format(' p=%.2f%s', [AMal, BoolToStr(AIntent <> '', ' intent=' + AIntent, '')]);
+    LModel := Format(' p=%.2f%s%s', [AMal, BoolToStr(AIntent <> '', ' intent=' + AIntent, ''), LAgentNote]);
     if FCfg.Shadow then
     begin
       if LModelInstant then
@@ -1285,9 +1306,9 @@ begin
         end;
         if AJob.Ok then
           Decide(C, LLine.Summary, LLine.Tags, LLine.Score, LLine.Truth, LLine.Category, LItem.Malicious,
-            LItem.Intent, LHow, ANow)
+            LItem.Intent, LHow, ANow, LLine.AgentOnly)
         else if (AJob.Error = 'rate limit') or (FCfg.OnError = 'rules') then
-          Decide(C, LLine.Summary, LLine.Tags, LLine.Score, LLine.Truth, LLine.Category, -1, '', LHow, ANow)
+          Decide(C, LLine.Summary, LLine.Tags, LLine.Score, LLine.Truth, LLine.Category, -1, '', LHow, ANow, LLine.AgentOnly)
         else
         begin
           CountEval(LLine.Truth, LLine.Category, LLine.Score >= FCfg.RulesMinScore, False);
@@ -1308,7 +1329,7 @@ begin
             Continue;
           end;
           Decide(C, LLine.Summary, LLine.Tags, LLine.Score, LLine.Truth, LLine.Category, LItem.Malicious,
-            LItem.Intent, FCfg.Mode + ' (verdict of the batch in flight)', ANow);
+            LItem.Intent, FCfg.Mode + ' (verdict of the batch in flight)', ANow, LLine.AgentOnly);
         end;
         C.Pending.Clear;
         C.PendingTags.Clear;
@@ -1584,6 +1605,17 @@ procedure TBanEngine.FlushAll;
 begin
   if FQueue.Count > 0 then
     Flush(FLastNow);
+end;
+
+{ strikes still inside findtime: the ones AddStrike counts toward a ban }
+function TBanEngine.LiveStrikes(C: TClient; ANow: Int64): Integer;
+var
+  I: Integer;
+begin
+  Result := 0;
+  for I := 0 to High(C.Strikes) do
+    if ANow - C.Strikes[I] < FCfg.FindTime then
+      Inc(Result);
 end;
 
 procedure TBanEngine.AddStrike(C: TClient; ANow: Int64; AInstant: Boolean; const AReason: string);

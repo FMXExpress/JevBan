@@ -13,6 +13,8 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 DELAY = float(os.environ.get("MOCK_DELAY", "0"))
 # MOCK_KEY: the key the Decisions API endpoint expects in x-goog-api-key (any non-empty key if unset)
 KEY = os.environ.get("MOCK_KEY", "")
+# MOCK_P=p: every client gets probability p (a model wrongly sure of everything, for guard tests)
+FIXED_P = os.environ.get("MOCK_P")
 # MOCK_429=N: the first N requests get HTTP 429, worded as Google words it
 RATE_LIMITED = [int(os.environ.get("MOCK_429", "0"))]
 
@@ -84,7 +86,7 @@ class H(BaseHTTPRequestHandler):
             ip = re.search(r"client (\S+) \(", q["instructions"]).group(1)
             bad = any(t in clients[ip]["signature_hits"] for t in BAD)
             if q["type"] == "noul":
-                p = 0.99 if bad else 0.08
+                p = float(FIXED_P) if FIXED_P else (0.99 if bad else 0.08)
                 answers[key] = {"type": "noul", "noul": p}
                 if gemini:
                     answers[key]["confidence"] = max(p, 1 - p)

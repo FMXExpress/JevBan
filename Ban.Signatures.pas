@@ -53,7 +53,9 @@ type
     destructor Destroy; override;
     procedure LoadFile(const AFile: string);
     { total weight of the matching rules; their tags go to ATags }
-    function Score(const E: TAccessEntry; ATags: TStrings): Integer;
+    function Score(const E: TAccessEntry; ATags: TStrings): Integer; overload;
+    { AAgentScore: the part from user-agent rules (who the client says it is, not what it asked for) }
+    function Score(const E: TAccessEntry; ATags: TStrings; out AAgentScore: Integer): Integer; overload;
     function Count: Integer;
   end;
 
@@ -274,12 +276,20 @@ end;
 
 function TSignatureSet.Score(const E: TAccessEntry; ATags: TStrings): Integer;
 var
+  LAgent: Integer;
+begin
+  Result := Score(E, ATags, LAgent);
+end;
+
+function TSignatureSet.Score(const E: TAccessEntry; ATags: TStrings; out AAgentScore: Integer): Integer;
+var
   I: Integer;
   LSig: TSignature;
   LField: TSigField;
   LMatch: array[TSigField] of TSigMatch;
 begin
   Result := 0;
+  AAgentScore := 0;
   if FItems.Count = 0 then
     Exit;
   for LField := Low(TSigField) to High(TSigField) do
@@ -300,6 +310,8 @@ begin
     if LMatch[LSig.Field].Bits[I shr 6] and (QWord(1) shl (I and 63)) <> 0 then
     begin
       Inc(Result, LSig.Weight);
+      if LSig.Field = sfAgent then
+        Inc(AAgentScore, LSig.Weight);
       if ATags <> nil then
         ATags.Add(LSig.Tag);
     end;
