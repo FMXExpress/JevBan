@@ -39,7 +39,7 @@ interface
 
 uses
   SysUtils, Classes, Math, Contnrs, SyncObjs, fpjson, jsonparser,
-  Ban.Net, Ban.Hash, Ban.Apache, Ban.LogFormats, Ban.Digest, Ban.Signatures, Ban.BadPaths, Ban.Jev, Ban.Local, Ban.Firewall, Ban.Config;
+  Ban.Net, Ban.Hash, Ban.Apache, Ban.LogFormats, Ban.Digest, Ban.Cloudflare, Ban.Signatures, Ban.BadPaths, Ban.Jev, Ban.Local, Ban.Firewall, Ban.Config;
 
 const
   { --eval labels }
@@ -200,6 +200,8 @@ type
     FLastSave: QWord;
     FClients: TStrMap;       { ip -> TClient (owned) }
     FDigest: TDigest;        { --digest only }
+    FCloudflareNets: TCidrList;
+    FProxySeen, FProxyHits: Integer;   { the first lines, checked for a proxy in front }
     FPurgeNow: Int64;
     FBans: TStringList;      { ip -> TBanRecord }
     FMinute: Int64;
@@ -525,6 +527,19 @@ begin
   FAction.UnbanCmd := FCfg.ActionUnban;
   FAction.DryRun := FCfg.DryRun;
   FAction.ApplyPreset;
+  if FCfg.CfAccount <> '' then
+  begin
+    FAction.Cloudflare := TCloudflare.Create(@Log);
+    FAction.Cloudflare.AccountId := FCfg.CfAccount;
+    FAction.Cloudflare.Token := FCfg.CfToken;
+    FAction.Cloudflare.ListName := FCfg.CfList;
+    FAction.Cloudflare.Zones := FCfg.CfZones;
+    FAction.Cloudflare.MakeRules := FCfg.CfRules;
+    FAction.Cloudflare.MaxItems := FCfg.CfMaxItems;
+    FAction.Cloudflare.ApiBase := FCfg.CfApi;
+    FAction.Cloudflare.DryRun := FCfg.DryRun;
+  end;
+  FCloudflareNets := ParseCidrList(CCloudflareRanges);
   FClients := TStrMap.Create(True, 1024);
   FBans := TStringList.Create;
   FBans.Sorted := True;
@@ -734,6 +749,19 @@ begin
     Exit;
   end;
   Inc(Stats.Parsed);
+  { behind Cloudflare without mod_remoteip, the log has its addresses, not the visitors' }
+  if (FProxySeen < 2000) and (FCfg.Behind = '') then
+  begin
+    Inc(FProxySeen);
+    if InCidrList(FCloudflareNets, E.Ip) then
+      Inc(FProxyHits);
+    if (FProxySeen = 2000) and (FProxyHits * 10 >= FProxySeen * 3) then
+      Log(Format('WARNING: %d of the first %d requests come from Cloudflare''s addresses: this site is ' +
+        'behind Cloudflare and the log has its addresses, not the visitors''. Banning one blocks many ' +
+        'visitors and no attacker. Log the real address (mod_remoteip with CF-Connecting-IP) and set ' +
+        'behind = cloudflare, or [cloudflare] to ban at its edge (README, "Behind Cloudflare")',
+        [FProxyHits, FProxySeen]));
+  end;
   if InCidrList(FCfg.IgnoreIp, E.Ip) then
   begin
     Inc(Stats.Ignored);

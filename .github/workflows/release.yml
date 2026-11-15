@@ -83,6 +83,8 @@ jobs:
           grep -q "192.0.2.200 REVIEW .*user agent only" out.txt
           grep -q "Ban 198.51.100.60" out.txt
           grep -q "Ban 203.0.113.70" out.txt
+          # the cloudflare action against a mock of its API
+          tests/cloudflare_e2e.sh ./build/jevban 3020
       - name: Package
         run: |
           OUT="jevban-$VERSION-linux-x64"
