@@ -96,7 +96,10 @@ begin
   { code execution }
   AddRule(10, sfAny, 'log4shell', '\$\{(jndi|env|lower|upper|sys|java|::-)');
   AddRule(10, sfUrl, 'shell-inject', '(;|\||`|\$\(|&&)\s*(wget|curl|sh|bash|nc|ncat|chmod|busybox|tftp|' +
-    'echo|cat|rm|perl|python)\b');
+    'echo|cat|rm|perl|python|id|whoami|uname|hostname|ifconfig|ping)\b');
+  { template injection probes: {{7*7}}, ${7*7}, <%= 7*7 %>, {{config}} and friends }
+  AddRule(10, sfUrl, 'template-inject', '(\{\{\s*\d+\s*\*\s*\d+\s*\}\}|\$\{\s*\d+\s*\*\s*\d+\s*\}|' +
+    '<%=\s*\d+\s*\*\s*\d+\s*%>|\{\{[^}]*(phpversion|config|self\.|__class__|request\.|_self\.env)[^}]*\}\})');
   AddRule(10, sfUrl, 'php-rce', '(allow_url_include|auto_prepend_file|php://(input|filter)|data://text|' +
     'eval-stdin\.php|/vendor/phpunit/|call_user_func_array|invokefunction|_ignition/execute-solution|' +
     'think\\app|base64_decode\()');
@@ -115,7 +118,10 @@ begin
     'mgmt/tm/util/bash|hudson/script|cgi-bin/.*\.(sh|cgi)\?)');
   AddRule(10, sfUrl, 'sqli', '(union(\s|/\*.*\*/)+(all(\s|/\*.*\*/)+)?select|information_schema|' +
     'sleep\(\s*\d|benchmark\(|waitfor\s+delay|extractvalue\(|updatexml\(|' +
-    '''\s*(or|and)\s+''?\d+''?\s*=\s*''?\d)');
+    { a quote closed, then a condition always true or false: ' or 1=1, " AND 1=1--, ' and 1=(select .. }
+    '[''"]\s*(or|and)\s+[''"]?\d+[''"]?\s*=\s*([''"]?\d|\(\s*select\b)|' +
+    { no quote (a numeric parameter): id=1 AND 1=(SELECT ...), and 2>1 style is left to the model }
+    '\b(or|and)\s+\d+\s*=\s*\(\s*select\b)');
   AddRule(6, sfUrl, 'xss', '(<script|javascript:|onerror\s*=|onload\s*=|<svg|<iframe|alert\()');
   { admin panels nobody should be guessing }
   AddRule(6, sfUrl, 'db-admin', '/(phpmyadmin|pma|myadmin|mysqladmin|sqladmin|adminer|dbadmin|' +
