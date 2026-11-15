@@ -385,6 +385,55 @@ against 34 hard-rule decisions. Rules alone never strike these clients, so every
 guesser the model banned (3 of 3 on WordPress) is one the rules let through, and every pass
 is a site-dependent request that a stricter rule would have had to ban or ignore blindly.
 
+## Behind Cloudflare
+
+Behind Cloudflare (or any reverse proxy), Apache logs the proxy's address, not the visitor's.
+On one real WordPress server 82% of a day's requests came from 1,430 Cloudflare addresses, and
+the rules would have banned 343 of them: each one many visitors, none of them the attacker, 19
+of them carrying the site's own `wp-cron` calls. jevban warns at startup when most requests
+come from Cloudflare's addresses.
+
+1. **Log the visitor.** In Apache, `mod_remoteip` with Cloudflare's header and ranges:
+
+   ```apache
+   RemoteIPHeader CF-Connecting-IP
+   RemoteIPTrustedProxy 173.245.48.0/20 103.21.244.0/22 103.22.200.0/22 103.31.4.0/22
+   RemoteIPTrustedProxy 141.101.64.0/18 108.162.192.0/18 190.93.240.0/20 188.114.96.0/20
+   RemoteIPTrustedProxy 197.234.240.0/22 198.41.128.0/17 162.158.0.0/15 104.16.0.0/13
+   RemoteIPTrustedProxy 104.24.0.0/14 172.64.0.0/13 131.0.72.0/22
+   RemoteIPTrustedProxy 2400:cb00::/32 2606:4700::/32 2803:f800::/32 2405:b500::/32
+   RemoteIPTrustedProxy 2405:8100::/32 2a06:98c0::/29 2c0f:f248::/32
+   ```
+
+   and `%a` instead of `%h` in the `LogFormat` (`a2enmod remoteip`; the ranges are
+   [cloudflare.com/ips](https://www.cloudflare.com/ips/)). WordPress and its plugins then see the
+   visitor too.
+
+2. **Ban at Cloudflare.** The origin's firewall never sees a visitor who comes through
+   Cloudflare. With `[cloudflare]`, jevban keeps one IP list in the account (`jevban`) and adds
+   one rule to each site, `ip.src in $jevban` (block), so an address caught on one site is
+   blocked on all of them; a new site gets its rule the next time jevban starts. The list is
+   replaced whole after each batch of bans (one API call), from the bans jevban holds, so a
+   failed update is put right by the next one; expired bans leave it.
+
+   ```ini
+   [cloudflare]
+   account_id = 0123456789abcdef0123456789abcdef
+   api_token =              ; or CLOUDFLARE_API_TOKEN
+   ```
+
+   The token needs **Account Filter Lists: Edit**, **Zone WAF: Edit** and **Zone: Read**. The
+   free plan allows one custom list (10,000 addresses in all lists) and five custom rules per
+   site; with the one list already used, set `list =` to that IP list.
+
+3. **Keep `[action]` too.** Requests straight to the server's address (on that server, 18% of
+   the day, half of them probes) bypass Cloudflare; a firewall ban stops those, and a visitor's
+   address in the origin firewall cannot hurt traffic that arrives through Cloudflare. Or allow
+   only Cloudflare's ranges to ports 80 and 443 and drop the rest.
+
+`[cloudflare]` implies `behind = cloudflare` in `[jevban]`: Cloudflare's own addresses are never
+judged or banned, whatever the log says.
+
 ## Configuration
 
 Settings live in `/etc/jevban/jevban.ini` (or `jevban.ini` next to the binary); the shipped file

@@ -17,7 +17,7 @@ unit Ban.Firewall;
 interface
 
 uses
-  SysUtils, Classes, Process, SyncObjs, Ban.Net;
+  SysUtils, Classes, Process, SyncObjs, Ban.Net, Ban.Cloudflare;
 
 type
   TLogProc = procedure(const AMsg: string) of object;
@@ -41,6 +41,9 @@ type
     (* the preset's own ban and unban commands are in use (not the config's):
        ipset, nftables and iptables then take a whole batch in one process *)
     BatchKind: string;
+    { bans at Cloudflare's edge too ([cloudflare]); owned, nil if not configured }
+    Cloudflare: TCloudflare;
+    destructor Destroy; override;
     constructor Create(ALog: TLogProc);
     { fills the four commands from Kind; raises on an unknown preset }
     procedure ApplyPreset;
@@ -54,6 +57,9 @@ type
        iptables-restore) is retried one by one, so each failure is reported *)
     procedure BanMany(const AIps: array of TIpAddr; const ASecs: array of Int64);
     procedure UnbanMany(const AIps: array of TIpAddr);
+    { the firewall part alone }
+    procedure BanManyLocal(const AIps: array of TIpAddr; const ASecs: array of Int64);
+    procedure UnbanManyLocal(const AIps: array of TIpAddr);
   end;
 
   TActionJob = record
@@ -302,14 +308,25 @@ begin
     Say(AWhat + ' failed');
 end;
 
+destructor TBanAction.Destroy;
+begin
+  Cloudflare.Free;
+  inherited Destroy;
+end;
+
 procedure TBanAction.Start;
 begin
   RunLifecycle(StartCmd, 'actionstart');
+  { the list and the zones' rules; if Cloudflare cannot be reached now, the first ban tries again }
+  if Cloudflare <> nil then
+    Cloudflare.Setup;
 end;
 
 procedure TBanAction.Stop;
 begin
   RunLifecycle(StopCmd, 'actionstop');
+  if Cloudflare <> nil then
+    Cloudflare.Clear;
 end;
 
 function TBanAction.Ban(const AIp: TIpAddr; ABanSecs: Int64): Boolean;
@@ -363,12 +380,19 @@ begin
 end;
 
 procedure TBanAction.BanMany(const AIps: array of TIpAddr; const ASecs: array of Int64);
+begin
+  if Length(AIps) = 0 then
+    Exit;
+  BanManyLocal(AIps, ASecs);
+  if Cloudflare <> nil then
+    Cloudflare.Ban(AIps);
+end;
+
+procedure TBanAction.BanManyLocal(const AIps: array of TIpAddr; const ASecs: array of Int64);
 var
   I: Integer;
   L4, L6, LLine: string;
 begin
-  if Length(AIps) = 0 then
-    Exit;
   if (BatchKind <> '') and not DryRun and (Length(AIps) > 1) then
   begin
     L4 := '';
@@ -387,12 +411,19 @@ begin
 end;
 
 procedure TBanAction.UnbanMany(const AIps: array of TIpAddr);
+begin
+  if Length(AIps) = 0 then
+    Exit;
+  UnbanManyLocal(AIps);
+  if Cloudflare <> nil then
+    Cloudflare.Unban(AIps);
+end;
+
+procedure TBanAction.UnbanManyLocal(const AIps: array of TIpAddr);
 var
   I: Integer;
   L4, L6, LLine: string;
 begin
-  if Length(AIps) = 0 then
-    Exit;
   if (BatchKind <> '') and not DryRun and (Length(AIps) > 1) then
   begin
     L4 := '';

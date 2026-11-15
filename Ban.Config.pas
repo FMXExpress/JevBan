@@ -25,6 +25,10 @@ type
     LogFile: string;
     IgnoreIp: TCidrList;
     IgnoreIpText: string;
+    Behind: string;           { 'cloudflare': its addresses are proxies, never judged or banned }
+    CfAccount, CfToken, CfList, CfZones, CfApi: string;   { [cloudflare]: ban at the edge }
+    CfRules: Boolean;
+    CfMaxItems: Integer;
     FindTime: Int64;
     MaxRetry: Integer;
     BanTime: Int64;
@@ -150,10 +154,32 @@ const
       Model: 'gemini-decision-1'; KeyEnv: 'GEMINI_API_KEY'; MaxQuestions: 0; MaxPerMinute: 0; Wire: 'gemini';
       Threshold: 0.5; ReviewThreshold: 0.3));
 
+(* Cloudflare's edge addresses, from https://www.cloudflare.com/ips-v4 and ips-v6
+   (November 2026). Behind Cloudflare without mod_remoteip, every request in the log
+   comes from one of these: banning one blocks many visitors and no attacker *)
+const
+  CCloudflareRanges = '173.245.48.0/20 103.21.244.0/22 103.22.200.0/22 103.31.4.0/22 141.101.64.0/18 ' +
+    '108.162.192.0/18 190.93.240.0/20 188.114.96.0/20 197.234.240.0/22 198.41.128.0/17 162.158.0.0/15 ' +
+    '104.16.0.0/13 104.24.0.0/14 172.64.0.0/13 131.0.72.0/22 2400:cb00::/32 2606:4700::/32 2803:f800::/32 ' +
+    '2405:b500::/32 2405:8100::/32 2a06:98c0::/29 2c0f:f248::/32';
+
+{ a Cloudflare list name: ^[a-z0-9_]+$, at most 50 characters }
+function IsValidListName(const S: string): Boolean;
+
 implementation
 
 uses
   Ban.Jev;
+
+function IsValidListName(const S: string): Boolean;
+var
+  C: Char;
+begin
+  Result := (S <> '') and (Length(S) <= 50);
+  for C in S do
+    if not (C in ['a'..'z', '0'..'9', '_']) then
+      Exit(False);
+end;
 
 function ProviderNames: string;
 var
@@ -218,6 +244,11 @@ begin
   {$ENDIF}
   PollMs := 250;
   IgnoreIpText := '127.0.0.0/8 ::1';
+  CfList := 'jevban';
+  CfZones := 'all';
+  CfRules := True;
+  CfMaxItems := 10000;
+  CfApi := 'https://api.cloudflare.com/client/v4';
   FindTime := 600;
   MaxRetry := 3;
   BanTime := 3600;
@@ -438,6 +469,14 @@ begin
       StateFile := LIni.ReadString('jevban', 'statefile', StateFile);
       LogFile := LIni.ReadString('jevban', 'logfile', LogFile);
       IgnoreIpText := LIni.ReadString('jevban', 'ignoreip', IgnoreIpText);
+      Behind := LowerCase(Trim(LIni.ReadString('jevban', 'behind', Behind)));
+      CfAccount := Trim(LIni.ReadString('cloudflare', 'account_id', CfAccount));
+      CfToken := Trim(LIni.ReadString('cloudflare', 'api_token', CfToken));
+      CfList := Trim(LIni.ReadString('cloudflare', 'list', CfList));
+      CfZones := Trim(LIni.ReadString('cloudflare', 'zones', CfZones));
+      CfRules := LIni.ReadBool('cloudflare', 'rules', CfRules);
+      CfMaxItems := LIni.ReadInteger('cloudflare', 'max_items', CfMaxItems);
+      CfApi := Trim(LIni.ReadString('cloudflare', 'api', CfApi));
       FindTime := LIni.ReadInt64('jevban', 'findtime', FindTime);
       MaxRetry := LIni.ReadInteger('jevban', 'maxretry', MaxRetry);
       BanTime := LIni.ReadInt64('jevban', 'bantime', BanTime);
@@ -613,6 +652,20 @@ var
   end;
 
 begin
+  if (CfAccount <> '') and (CfToken = '') then
+    CfToken := GetEnvironmentVariable('CLOUDFLARE_API_TOKEN');
+  if (CfAccount <> '') and (CfToken = '') then
+    raise EArgumentException.Create('[cloudflare] needs api_token (or CLOUDFLARE_API_TOKEN)');
+  if (CfList <> '') and not IsValidListName(CfList) then
+    raise EArgumentException.CreateFmt('[cloudflare] list must be lowercase letters, digits and _ (at most 50), ' +
+      'not "%s"', [CfList]);
+  { banning at Cloudflare means the site is behind it }
+  if CfAccount <> '' then
+    Behind := 'cloudflare';
+  if (Behind <> '') and (Behind <> 'cloudflare') and (Behind <> 'none') then
+    raise EArgumentException.CreateFmt('behind must be cloudflare or none, not "%s"', [Behind]);
+  if Behind = 'cloudflare' then
+    IgnoreIpText := IgnoreIpText + ' ' + CCloudflareRanges;
   IgnoreIp := ParseCidrList(IgnoreIpText);
   if (LogPaths.Count = 0) and not ListBans then
     raise EArgumentException.Create('no log to follow: set logpath in [jevban] or pass --log');

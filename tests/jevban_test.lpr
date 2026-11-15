@@ -672,6 +672,49 @@ begin
   Check(not FindLocalModel('/tmp/x.gguf', LInfo), 'a path is not a key');
 end;
 
+procedure TestCloudflareConfig;
+var
+  C: TBanConfig;
+
+  function StrToIp(const S: string): TIpAddr;
+  begin
+    if not ParseIp(S, Result) then
+      raise Exception.Create('bad test address ' + S);
+  end;
+
+begin
+  Check(IsValidListName('jevban') and IsValidListName('blocked_2026') and not IsValidListName('JevBan') and
+    not IsValidListName('jev-ban') and not IsValidListName('') and not IsValidListName(StringOfChar('a', 51)),
+    'cloudflare list names: ^[a-z0-9_]+$, at most 50');
+  C := TBanConfig.Create;
+  try
+    C.LogPaths.Add('x.log');
+    C.CfAccount := '0123456789abcdef0123456789abcdef';
+    C.CfToken := 't';
+    C.Validate;
+    Check((C.Behind = 'cloudflare') and InCidrList(C.IgnoreIp, StrToIp('104.16.0.1')) and
+      InCidrList(C.IgnoreIp, StrToIp('2606:4700::1')) and not InCidrList(C.IgnoreIp, StrToIp('198.51.100.200')),
+      '[cloudflare] implies behind: its addresses are ignored, a direct one is not');
+  finally
+    C.Free;
+  end;
+  C := TBanConfig.Create;
+  try
+    C.LogPaths.Add('x.log');
+    C.CfAccount := '0123456789abcdef0123456789abcdef';
+    C.CfToken := '';
+    try
+      C.Validate;
+      Check(GetEnvironmentVariable('CLOUDFLARE_API_TOKEN') <> '', '[cloudflare] without a token is refused');
+    except
+      on E: EArgumentException do
+        Check(Pos('api_token', E.Message) > 0, '[cloudflare] without a token is refused');
+    end;
+  finally
+    C.Free;
+  end;
+end;
+
 procedure TestProviders;
 var
   C: TBanConfig;
@@ -764,6 +807,7 @@ begin
   TestNet;
   TestBadPaths;
   TestProviders;
+  TestCloudflareConfig;
   TestLocal;
   TestApache;
   TestLogFormats;

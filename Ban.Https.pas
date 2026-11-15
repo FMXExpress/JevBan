@@ -38,6 +38,9 @@ procedure HttpsGetToFile(const AUrl, ADest: string; AVerbose: Boolean = True);
    ATimeoutMs bounds the connect and every read. Raises on transport errors. *)
 function HttpPostJson(const AUrl, ABody: string; const AHeaders: array of string;
   ATimeoutMs: Integer; out AStatus: Integer): string;
+{ the same with any method (GET, PUT, POST, DELETE); an empty ABody sends none }
+function HttpJson(const AMethod, AUrl, ABody: string; const AHeaders: array of string;
+  ATimeoutMs: Integer; out AStatus: Integer): string;
 
 implementation
 
@@ -92,7 +95,7 @@ type
     constructor Create;
     destructor Destroy; override;
     procedure Get(const AUrl: string; AStream: TStream; AVerbose: Boolean);
-    function Post(const AUrl, ABody: string; const AHeaders: array of string;
+    function Post(const AMethod, AUrl, ABody: string; const AHeaders: array of string;
       ATimeoutMs: Integer; out AStatus: Integer): string;
   end;
 
@@ -404,7 +407,7 @@ begin
   raise EHTTPClient.CreateFmt('too many redirects for %s', [AUrl]);
 end;
 
-function TDownloader.Post(const AUrl, ABody: string; const AHeaders: array of string;
+function TDownloader.Post(const AMethod, AUrl, ABody: string; const AHeaders: array of string;
   ATimeoutMs: Integer; out AStatus: Integer): string;
 var
   LReq: TStringStream;
@@ -416,7 +419,8 @@ begin
   PickRoute(FTarget.Host, LowerCase(FTarget.Protocol) = 'https');
   FClient.ConnectTimeout := ATimeoutMs;
   FClient.IOTimeout := ATimeoutMs;
-  FClient.AddHeader('Content-Type', 'application/json');
+  if ABody <> '' then
+    FClient.AddHeader('Content-Type', 'application/json');
   FClient.AddHeader('Accept', 'application/json');
   I := 0;
   while I + 1 <= High(AHeaders) do
@@ -427,8 +431,9 @@ begin
   LReq := TStringStream.Create(ABody);
   LResp := TStringStream.Create('');
   try
-    FClient.RequestBody := LReq;
-    FClient.HTTPMethod('POST', AUrl, LResp, []);   { [] = any status; the caller decides }
+    if ABody <> '' then
+      FClient.RequestBody := LReq;
+    FClient.HTTPMethod(AMethod, AUrl, LResp, []);   { [] = any status; the caller decides }
     AStatus := FClient.ResponseStatusCode;
     Result := LResp.DataString;
   finally
@@ -445,7 +450,20 @@ var
 begin
   LDl := TDownloader.Create;
   try
-    Result := LDl.Post(AUrl, ABody, AHeaders, ATimeoutMs, AStatus);
+    Result := LDl.Post('POST', AUrl, ABody, AHeaders, ATimeoutMs, AStatus);
+  finally
+    LDl.Free;
+  end;
+end;
+
+function HttpJson(const AMethod, AUrl, ABody: string; const AHeaders: array of string;
+  ATimeoutMs: Integer; out AStatus: Integer): string;
+var
+  LDl: TDownloader;
+begin
+  LDl := TDownloader.Create;
+  try
+    Result := LDl.Post(AMethod, AUrl, ABody, AHeaders, ATimeoutMs, AStatus);
   finally
     LDl.Free;
   end;
