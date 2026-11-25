@@ -384,6 +384,11 @@ Flash 9B banned one uptime monitor on the static site (five separate verdicts at
 `GET /`); with it, none (`bench/results/iter9-gemini`, `iter10-agent-guard`; Flash's
 WordPress and web app figures are from before the rule, which only ever removes strikes).
 
+Three small open decision models were also tested (Julia 1, OpenDecider-nano, TinyJev 0.6B) and are
+not supported: Julia 1 banned 56 of 73 benign WordPress clients, and the other two caught fewer
+attackers than the rules alone (`bench/results/iter11-small-models`; `bench/server_eval.sh` runs the
+same test against any `/v1/systemone` server).
+
 ### What the model decides, and what it doesn't
 
 The work is split by how certain a request is. Weight-10 matches are hard rules: never
